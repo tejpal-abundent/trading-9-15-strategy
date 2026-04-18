@@ -2,3 +2,10 @@
 *.log
 safety-check-log.json
 node_modules/
+
+# Runtime outputs (do not commit)
+screenshots/
+scan-results/
+visual-cost.json
+trades.csv
+trace2/

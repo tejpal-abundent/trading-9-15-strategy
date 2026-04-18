@@ -1,0 +1,6 @@
+[
+  { "label": "BTCUSDT", "tv_symbol": "BINANCE:BTCUSDT", "binance_symbol": "BTCUSDT" },
+  { "label": "ETHUSDT", "tv_symbol": "BINANCE:ETHUSDT", "binance_symbol": "ETHUSDT" },
+  { "label": "EURUSD",  "tv_symbol": "OANDA:EURUSD",    "binance_symbol": null },
+  { "label": "XAUUSD",  "tv_symbol": "OANDA:XAUUSD",    "binance_symbol": null }
+]

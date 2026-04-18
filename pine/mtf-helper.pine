@@ -1,0 +1,40 @@
+//@version=5
+// Drop this into TradingView Pine Editor and add to chart, then save the
+// chart as your default layout. Every symbol you open will then carry these
+// EMAs — which is what the bot's visual gate (Gemini) expects to see.
+indicator("MTF Helper — EMA9 + EMA15", overlay=true, max_labels_count=20)
+
+showSlope     = input.bool(true,  "Show slope-based bias bands")
+slopeLookback = input.int(3,      "Slope lookback (bars)", minval=1)
+showZoneFill  = input.bool(true,  "Highlight EMA9-EMA15 band")
+
+ema9  = ta.ema(close, 9)
+ema15 = ta.ema(close, 15)
+
+p9  = plot(ema9,  "EMA9",  color=color.new(color.orange, 0), linewidth=2)
+p15 = plot(ema15, "EMA15", color=color.new(color.purple, 0), linewidth=2)
+fill(p9, p15, color=showZoneFill ? color.new(color.gray, 80) : na, title="EMA9-15 zone")
+
+prev9   = ema9[slopeLookback]
+prev15  = ema15[slopeLookback]
+slope9  = ema9 - prev9
+slope15 = ema15 - prev15
+
+bothUp   = slope9 > 0 and slope15 > 0 and ema9 > ema15
+bothDown = slope9 < 0 and slope15 < 0 and ema9 < ema15
+
+bgcolor(showSlope and bothUp   ? color.new(color.green, 92) : na, title="Bullish bias band")
+bgcolor(showSlope and bothDown ? color.new(color.red,   92) : na, title="Bearish bias band")
+
+var table info = table.new(position.top_right, 2, 4, border_width=1)
+if barstate.islast
+    bias      = bothUp ? "BULLISH" : bothDown ? "BEARISH" : "—"
+    biasColor = bothUp ? color.green : bothDown ? color.red : color.gray
+    table.cell(info, 0, 0, "MTF Helper", text_color=color.white, bgcolor=color.new(color.blue, 30))
+    table.cell(info, 1, 0, str.tostring(close, "#.####"), text_color=color.white, bgcolor=color.new(color.blue, 30))
+    table.cell(info, 0, 1, "EMA9",  text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(ema9, "#.####"),  text_color=color.orange)
+    table.cell(info, 0, 2, "EMA15", text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(ema15, "#.####"), text_color=color.purple)
+    table.cell(info, 0, 3, "Bias",  text_color=color.white)
+    table.cell(info, 1, 3, bias,    text_color=biasColor)
