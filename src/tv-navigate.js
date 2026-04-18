@@ -7,8 +7,24 @@
 import CDP from "chrome-remote-interface";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { resolve } from "path";
+import { execSync } from "child_process";
 
 const CDP_PORT = 9222;
+
+// Activate the TradingView Desktop macOS app so it's the frontmost OS window.
+// Without this, the OS throttles GPU paints for background apps and our
+// CDP screenshots return stale frames even though setResolution succeeded.
+function activateTvDesktopApp() {
+  if (process.platform !== "darwin") return;
+  try {
+    execSync(
+      `osascript -e 'tell application "TradingView" to activate'`,
+      { stdio: "ignore", timeout: 2000 },
+    );
+  } catch {
+    // App not named "TradingView" or AppleScript failed — non-fatal
+  }
+}
 
 // Prefer the actual chart tab. TV Desktop sometimes has multiple pages open
 // (settings, watchlists, etc.). The chart's URL contains "/chart/".
@@ -363,10 +379,12 @@ export async function captureSymbolTf(client, slug, timeframe, expectedSymbol = 
     }
   }
 
-  // Force the page to the front. When TV Desktop is in the background, the
-  // GPU compositor throttles paints and Page.captureScreenshot returns a
-  // stale frame (chart's internal state is correct but the canvas hasn't
-  // been redrawn). bringToFront wakes the renderer.
+  // Activate the TV Desktop app at the OS level. macOS throttles GPU paints
+  // for non-frontmost apps; without this, the chart canvas keeps showing the
+  // previous TF even though setResolution succeeded.
+  activateTvDesktopApp();
+
+  // Force the CDP-attached page to the front within the app.
   await client.Page.bringToFront().catch(() => {});
 
   // bringToFront alone isn't enough after the first screenshot — the chart
