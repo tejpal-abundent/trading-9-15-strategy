@@ -13,12 +13,7 @@ import {
   dismissPopups,
 } from "./tv-navigate.js";
 import { askGeminiVision, getTodaysCost, recordCost, fillRubric } from "./visual.js";
-import {
-  fetchCandles as fetchHT,
-  emaAlignment,
-  agree,
-  priceInZone,
-} from "./higher-tf.js";
+import { fetchCandles, emaAlignment, agree } from "./higher-tf.js";
 
 const TIMEFRAMES = ["1H", "2H", "4H"];
 const HTF_TIMEFRAMES = ["1M", "1W", "1D"];
@@ -78,6 +73,28 @@ export function evaluateHtfChain(cells, opts = {}) {
   return { stopped: false, stopAt: null, stopReason: null, htfBias: firstDir, avgScore };
 }
 
+// For Binance symbols only — verifies that the visual HTF bias agrees with
+// the numeric EMA9/15 alignment computed from real 1M/1W/1D candles.
+// Returns { ran, direction, agreed, error? }.
+//   ran = false  → no Binance symbol available (skip cross-check entirely)
+//   agreed = false when numeric direction is null OR != htfBias
+async function runNumericCrossCheck(binanceSymbol, htfBias) {
+  if (!binanceSymbol) return { ran: false, direction: null, agreed: null };
+  try {
+    const [m, w, d] = await Promise.all([
+      fetchCandles(binanceSymbol, "1M", 60),
+      fetchCandles(binanceSymbol, "1W", 80),
+      fetchCandles(binanceSymbol, "1D", 120),
+    ]);
+    const dir = agree(emaAlignment(m), emaAlignment(w), emaAlignment(d));
+    // higher-tf returns "bullish" / "bearish" / null
+    const mapped = dir === "bullish" ? "long" : dir === "bearish" ? "short" : null;
+    return { ran: true, direction: mapped, agreed: mapped !== null && mapped === htfBias };
+  } catch (err) {
+    return { ran: true, direction: null, agreed: false, error: err.message };
+  }
+}
+
 function loadWatchlist(path = "watchlist.json") {
   if (!existsSync(path)) {
     throw new Error(`watchlist.json not found at ${path}`);
@@ -92,10 +109,10 @@ function loadWatchlist(path = "watchlist.json") {
 // Numeric Multi-TF gate (only callable for Binance-supported symbols).
 async function runNumericGate(binanceSymbol, entryTf, pullbackTolerancePct) {
   const [monthly, weekly, daily, entry] = await Promise.all([
-    fetchHT(binanceSymbol, "1M", 60),
-    fetchHT(binanceSymbol, "1W", 80),
-    fetchHT(binanceSymbol, "1D", 120),
-    fetchHT(binanceSymbol, entryTf, 200),
+    fetchCandles(binanceSymbol, "1M", 60),
+    fetchCandles(binanceSymbol, "1W", 80),
+    fetchCandles(binanceSymbol, "1D", 120),
+    fetchCandles(binanceSymbol, entryTf, 200),
   ]);
   const aM = emaAlignment(monthly);
   const aW = emaAlignment(weekly);
