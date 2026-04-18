@@ -15,9 +15,8 @@ import {
 import { askGeminiVision, getTodaysCost, recordCost, fillRubric } from "./visual.js";
 import { fetchCandles, emaAlignment, agree } from "./higher-tf.js";
 
-const TIMEFRAMES = ["1H", "2H", "4H"];
 const HTF_TIMEFRAMES = ["1M", "1W", "1D"];
-const ENTRY_TIMEFRAMES = ["4H", "2H", "1H"];
+const LTF_TIMEFRAMES = ["4H", "2H", "1H"];
 const RESULT_DIR = "scan-results";
 
 // Filesystem-safe slug from a watchlist entry's TV symbol.
@@ -106,538 +105,291 @@ function loadWatchlist(path = "watchlist.json") {
   return raw;
 }
 
-// Numeric Multi-TF gate (only callable for Binance-supported symbols).
-async function runNumericGate(binanceSymbol, entryTf, pullbackTolerancePct) {
-  const [monthly, weekly, daily, entry] = await Promise.all([
-    fetchCandles(binanceSymbol, "1M", 60),
-    fetchCandles(binanceSymbol, "1W", 80),
-    fetchCandles(binanceSymbol, "1D", 120),
-    fetchCandles(binanceSymbol, entryTf, 200),
-  ]);
-  const aM = emaAlignment(monthly);
-  const aW = emaAlignment(weekly);
-  const aD = emaAlignment(daily);
-  const aE = emaAlignment(entry);
-
-  const htfDirection = agree(aM, aW, aD);
-  const lastEntry = entry[entry.length - 1];
-  const inZone = priceInZone(lastEntry, aE.ema9, aE.ema15, pullbackTolerancePct);
-
-  const checks = {
-    monthly: aM.direction,
-    weekly: aW.direction,
-    daily: aD.direction,
-    entry: aE.direction,
-    htf_direction: htfDirection,
-    entry_aligns_with_htf: aE.direction === htfDirection,
-    in_zone: inZone,
-  };
-
-  const pass =
-    htfDirection !== null &&
-    aE.direction === htfDirection &&
-    inZone;
-
-  return { pass, direction: htfDirection, checks };
-}
-
-// Single (symbol, tf) cell — runs numeric (if Binance) + visual.
-async function evaluateCell(client, item, tf, options) {
-  const { rubricTemplate, pullbackTolerancePct, minLlmScore } = options;
+// Drives one HTF cell: switch chart, screenshot, ask Gemini with the htf-bias rubric.
+async function evaluateHtfCell(client, item, tf, rubric) {
   const slug = slugify(item.label);
-  const cell = {
-    label: item.label,
-    tv_symbol: item.tv_symbol,
-    binance_symbol: item.binance_symbol,
-    timeframe: tf,
-    numeric: { skipped: true, reason: "non_binance_or_skipped" },
-    visual: { skipped: true, reason: "not_run" },
-    overall: "skip",
-    notes: [],
-  };
-
-  // Numeric gate (only for Binance symbols)
-  if (item.binance_symbol) {
-    try {
-      const num = await runNumericGate(
-        item.binance_symbol,
-        tf,
-        pullbackTolerancePct,
-      );
-      cell.numeric = { skipped: false, ...num };
-    } catch (err) {
-      cell.numeric = { skipped: true, reason: `error: ${err.message}` };
-      cell.notes.push(`numeric error: ${err.message}`);
-    }
-  }
-
-  // Switch chart TF + screenshot, with verification.
   await setTimeframe(client, tf);
   await dismissPopups(client);
-  const stateAfter = await getChartState(client);
-  if (stateAfter && stateAfter.resolution) {
-    cell.actualResolution = stateAfter.resolution;
-  }
   const imagePath = await captureSymbolTf(client, slug, tf);
-  cell.imagePath = imagePath;
 
-  // Visual gate (Gemini)
-  const spentToday = getTodaysCost();
-  const maxSpend = parseFloat(process.env.MAX_LLM_SPEND_USD_PER_DAY || "2");
-  if (spentToday >= maxSpend) {
-    cell.visual = {
-      skipped: true,
-      reason: `daily_budget_exhausted ($${spentToday.toFixed(2)}/$${maxSpend})`,
-    };
-    cell.overall = "skipped";
-    return cell;
-  }
+  const prompt = fillRubric(rubric, { SYMBOL: item.label, TIMEFRAME: tf });
+  const { result, costUSD, model } = await askGeminiVision({
+    imagePath,
+    prompt,
+    model: process.env.VISUAL_MODEL || "gemini-2.5-flash",
+  });
+  recordCost(costUSD);
 
-  const direction = cell.numeric.direction || null;
-  const prompt = fillRubric(rubricTemplate, {
+  return {
+    tf,
+    direction: result.direction,
+    slope_ok: !!result.slope_ok,
+    pullback_present: !!result.pullback_present,
+    ema_stack_ok: !!result.ema_stack_ok,
+    score: result.score ?? 0,
+    red_flags: result.red_flags ?? [],
+    reasoning: result.reasoning ?? "",
+    image: imagePath,
+    cost_usd: costUSD,
+    model,
+  };
+}
+
+// Drives one LTF cell: switch chart, screenshot, ask Gemini with the
+// ltf-entry rubric and the HTF bias injected.
+async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
+  const slug = slugify(item.label);
+  await setTimeframe(client, tf);
+  await dismissPopups(client);
+  const imagePath = await captureSymbolTf(client, slug, tf);
+
+  const prompt = fillRubric(rubric, {
     SYMBOL: item.label,
     TIMEFRAME: tf,
+    HTF_BIAS: htfBias,
   });
+  const { result, costUSD, model } = await askGeminiVision({
+    imagePath,
+    prompt,
+    model: process.env.VISUAL_MODEL || "gemini-2.5-flash",
+  });
+  recordCost(costUSD);
 
-  try {
-    const { result, costUSD, model, inputTokens, outputTokens } =
-      await askGeminiVision({
-        imagePath,
-        prompt,
-        model: process.env.VISUAL_MODEL || "gemini-2.5-flash",
-      });
-    recordCost(costUSD);
+  const cell = {
+    tf,
+    zone_rejection: !!result.zone_rejection,
+    coc_present: !!result.coc_present,
+    strong_candle_in_bias: !!result.strong_candle_in_bias,
+    score: result.score ?? 0,
+    red_flags: result.red_flags ?? [],
+    reasoning: result.reasoning ?? "",
+    image: imagePath,
+    cost_usd: costUSD,
+    model,
+  };
+  cell.signals_count =
+    (cell.zone_rejection ? 1 : 0) +
+    (cell.coc_present ? 1 : 0) +
+    (cell.strong_candle_in_bias ? 1 : 0);
+  cell.pass = ltfCellPass(cell);
+  return cell;
+}
 
-    const visConfirm =
-      result.direction !== "none" &&
-      result.angle_ok === true &&
-      result.price_at_zone === true &&
-      result.coc_present === true &&
-      result.confirm_candle != null &&
-      (result.red_flags?.length ?? 0) === 0 &&
-      (result.score ?? 0) >= minLlmScore;
+// Single-symbol pipeline. Drives HTF chain → numeric cross-check → LTF chain.
+// Returns the full result object matching the spec schema.
+async function evaluateSymbol(client, item, htfRubric, ltfRubric, opts = {}) {
+  const verbose = opts.verbose !== false;
+  const log = (msg) => {
+    if (verbose) console.log(msg);
+  };
 
-    cell.visual = {
-      skipped: false,
-      ...result,
-      costUSD,
-      model,
-      inputTokens,
-      outputTokens,
-      confirm: visConfirm,
-    };
+  const result = {
+    symbol: item.label,
+    tv_symbol: item.tv_symbol,
+    started_at: new Date().toISOString(),
+    stopped_at: null,
+    stop_reason: null,
+    htf_cells: [],
+    htf_avg_score: null,
+    htf_bias: null,
+    numeric_check: { ran: false, direction: null, agreed: null },
+    ltf_cells: [],
+    triggers: [],
+    cost_usd: 0,
+  };
 
-    // Overall: visual must pass; if numeric ran, it must also pass; if numeric
-    // and visual both vote on direction, they should agree.
-    if (cell.numeric.skipped) {
-      cell.overall = visConfirm ? "PASS" : "reject";
-    } else {
-      const directionAgreed =
-        !cell.numeric.direction ||
-        result.direction === "none" ||
-        cell.numeric.direction.startsWith(result.direction.slice(0, 4)) ||
-        // bullish ↔ long, bearish ↔ short
-        (cell.numeric.direction === "bullish" && result.direction === "long") ||
-        (cell.numeric.direction === "bearish" && result.direction === "short");
+  await setSymbol(client, item.tv_symbol);
+  await dismissPopups(client);
 
-      cell.overall =
-        cell.numeric.pass && visConfirm && directionAgreed ? "PASS" : "reject";
-      if (cell.numeric.pass && visConfirm && !directionAgreed) {
-        cell.notes.push(
-          `direction mismatch: numeric=${cell.numeric.direction}, visual=${result.direction}`,
-        );
-      }
+  // HTF chain (sequential, fail-fast)
+  for (const tf of HTF_TIMEFRAMES) {
+    log(`    HTF ${tf} ...`);
+    const cell = await evaluateHtfCell(client, item, tf, htfRubric);
+    result.htf_cells.push(cell);
+    result.cost_usd += cell.cost_usd;
+    log(`      dir=${cell.direction} score=${cell.score}`);
+
+    const chain = evaluateHtfChain(result.htf_cells);
+    if (chain.stopped) {
+      result.stopped_at = chain.stopAt ?? tf;
+      result.stop_reason = chain.stopReason;
+      log(`    🚫 STOP @ ${result.stopped_at}: ${result.stop_reason}`);
+      return result;
     }
-  } catch (err) {
-    cell.visual = { skipped: true, reason: `error: ${err.message}` };
-    cell.overall = "error";
-    cell.notes.push(`visual error: ${err.message}`);
   }
 
-  return cell;
+  const finalChain = evaluateHtfChain(result.htf_cells);
+  result.htf_avg_score = finalChain.avgScore;
+  if (finalChain.stopped) {
+    result.stop_reason = finalChain.stopReason;
+    log(`    🚫 STOP: ${result.stop_reason} (avg ${finalChain.avgScore?.toFixed(2)})`);
+    return result;
+  }
+  result.htf_bias = finalChain.htfBias;
+  log(`    ✅ HTF bias: ${result.htf_bias} (avg ${finalChain.avgScore.toFixed(2)})`);
+
+  // Binance numeric cross-check
+  if (item.binance_symbol) {
+    const num = await runNumericCrossCheck(item.binance_symbol, result.htf_bias);
+    result.numeric_check = num;
+    log(
+      `    numeric: ran=${num.ran} dir=${num.direction} agreed=${num.agreed}`,
+    );
+    if (!num.agreed) {
+      result.stop_reason = "numeric_disagree";
+      log(`    🚫 STOP: numeric_disagree`);
+      return result;
+    }
+  }
+
+  // LTF chain
+  for (const tf of LTF_TIMEFRAMES) {
+    log(`    LTF ${tf} ...`);
+    const cell = await evaluateLtfCell(client, item, tf, result.htf_bias, ltfRubric);
+    result.ltf_cells.push(cell);
+    result.cost_usd += cell.cost_usd;
+    log(
+      `      signals=${cell.signals_count} score=${cell.score} ` +
+        `pass=${cell.pass}`,
+    );
+    if (cell.pass) result.triggers.push(tf);
+  }
+
+  if (result.triggers.length === 0) {
+    result.stop_reason = "no_entry";
+  }
+  return result;
+}
+
+function loadRubrics(opts = {}) {
+  const htfPath = opts.htfRubricPath || "prompts/htf-bias.md";
+  const ltfPath = opts.ltfRubricPath || "prompts/ltf-entry.md";
+  return {
+    htfRubric: readFileSync(htfPath, "utf8"),
+    ltfRubric: readFileSync(ltfPath, "utf8"),
+  };
+}
+
+function saveResult(prefix, label, payload) {
+  if (!existsSync(RESULT_DIR)) mkdirSync(RESULT_DIR, { recursive: true });
+  const stamp = (payload.started_at || new Date().toISOString()).replace(/[:.]/g, "-");
+  const out = `${RESULT_DIR}/${prefix}-${slugify(label)}-${stamp}.json`;
+  writeFileSync(out, JSON.stringify(payload, null, 2));
+  writeFileSync(`${RESULT_DIR}/latest-${prefix}.json`, JSON.stringify(payload, null, 2));
+  return out;
+}
+
+function summaryLine(r) {
+  if (r.stop_reason && !r.htf_bias) {
+    return `  ${r.symbol.padEnd(12)} STOP @ ${r.stopped_at ?? "—"} (${r.stop_reason})`;
+  }
+  if (r.stop_reason === "numeric_disagree") {
+    return `  ${r.symbol.padEnd(12)} STOP numeric_disagree (HTF said ${r.htf_bias})`;
+  }
+  const numTxt = r.numeric_check.ran
+    ? r.numeric_check.agreed
+      ? "agree"
+      : "disagree"
+    : "n/a";
+  const triggers = r.triggers.length ? `[${r.triggers.join(", ")}]` : "no entry";
+  return (
+    `  ${r.symbol.padEnd(12)} HTF: ${r.htf_bias} ` +
+    `(avg ${r.htf_avg_score.toFixed(1)})  →  numeric: ${numTxt}  →  triggers: ${triggers}`
+  );
+}
+
+export async function runDeepScan(symbolLabel, tvSymbol, options = {}) {
+  const { htfRubric, ltfRubric } = loadRubrics(options);
+  const item = {
+    label: symbolLabel,
+    tv_symbol: tvSymbol,
+    binance_symbol: options.binanceSymbol ?? null,
+  };
+
+  console.log(
+    `\n═══════════════════════════════════════════════════════════\n` +
+      `  Deep scan: ${symbolLabel} (${tvSymbol})\n` +
+      `  Flow: HTF [1M→1W→1D] → numeric → LTF [4H→2H→1H]\n` +
+      `═══════════════════════════════════════════════════════════\n`,
+  );
+
+  let client;
+  let result;
+  try {
+    client = await openTvClient();
+    result = await evaluateSymbol(client, item, htfRubric, ltfRubric, { verbose: true });
+  } finally {
+    await closeTvClient(client);
+  }
+
+  console.log("\n" + summaryLine(result));
+  const path = saveResult("deep", symbolLabel, result);
+  console.log(`\nFull results saved → ${path}`);
+  return result;
 }
 
 export async function runScan(options = {}) {
   const watchlist = loadWatchlist(options.watchlistPath || "watchlist.json");
-  const rubricTemplate = readFileSync(
-    options.rubricPath || "prompts/scan-rubric.md",
-    "utf8",
-  );
-  const pullbackTolerancePct = parseFloat(
-    process.env.PULLBACK_TOLERANCE_PCT || "0.5",
-  );
-  const minLlmScore = parseInt(process.env.MIN_LLM_SCORE || "7");
+  const { htfRubric, ltfRubric } = loadRubrics(options);
 
   const startedAt = new Date().toISOString();
   console.log(
     `\n═══════════════════════════════════════════════════════════\n` +
       `  Scan started: ${startedAt}\n` +
-      `  Watchlist: ${watchlist.length} symbols × ${TIMEFRAMES.length} timeframes ` +
-      `= ${watchlist.length * TIMEFRAMES.length} cells\n` +
+      `  Watchlist: ${watchlist.length} symbols\n` +
+      `  Flow per symbol: HTF [1M→1W→1D] → numeric → LTF [4H→2H→1H]\n` +
       `═══════════════════════════════════════════════════════════\n`,
   );
 
-  let client;
   const results = [];
-
+  let client;
   try {
     client = await openTvClient();
-
-    for (const [index, item] of watchlist.entries()) {
-      console.log(
-        `\n[${index + 1}/${watchlist.length}] ▶ ${item.label} (${item.tv_symbol})`,
-      );
-
+    for (const [i, item] of watchlist.entries()) {
+      console.log(`\n[${i + 1}/${watchlist.length}] ▶ ${item.label} (${item.tv_symbol})`);
       try {
-        await setSymbol(client, item.tv_symbol);
-        await dismissPopups(client);
-        const state = await getChartState(client);
-        if (state) {
-          console.log(`    chart now showing: ${state.symbol} @ ${state.resolution}`);
-        }
+        const r = await evaluateSymbol(client, item, htfRubric, ltfRubric, { verbose: true });
+        results.push(r);
       } catch (err) {
-        console.log(`    ❌ navigation failed: ${err.message}`);
+        console.log(`    ❌ ${err.message}`);
         results.push({
-          label: item.label,
-          error: `nav: ${err.message}`,
-          cells: [],
+          symbol: item.label,
+          tv_symbol: item.tv_symbol,
+          stopped_at: null,
+          stop_reason: `error: ${err.message}`,
+          htf_cells: [],
+          htf_bias: null,
+          ltf_cells: [],
+          triggers: [],
+          cost_usd: 0,
         });
-        continue;
       }
-
-      const cells = [];
-      for (const tf of TIMEFRAMES) {
-        process.stdout.write(`    ${tf} ...`);
-        const cell = await evaluateCell(client, item, tf, {
-          rubricTemplate,
-          pullbackTolerancePct,
-          minLlmScore,
-        });
-        cells.push(cell);
-        const score = cell.visual.score ?? "—";
-        const dir = cell.visual.direction ?? "—";
-        const tag =
-          cell.overall === "PASS"
-            ? "✅ PASS"
-            : cell.overall === "error"
-              ? "⚠️  ERROR"
-              : cell.overall === "skipped"
-                ? "⏭  SKIP"
-                : `🚫 reject`;
-        console.log(` ${tag}  (dir=${dir}, score=${score})`);
-      }
-      results.push({ label: item.label, tv_symbol: item.tv_symbol, cells });
     }
   } finally {
     await closeTvClient(client);
   }
 
-  const finishedAt = new Date().toISOString();
-  printReportCard(results);
-
-  if (!existsSync(RESULT_DIR)) mkdirSync(RESULT_DIR, { recursive: true });
-  const stamp = startedAt.replace(/[:.]/g, "-");
-  const outPath = `${RESULT_DIR}/scan-${stamp}.json`;
-  const summary = { startedAt, finishedAt, results };
-  writeFileSync(outPath, JSON.stringify(summary, null, 2));
-  writeFileSync(`${RESULT_DIR}/latest.json`, JSON.stringify(summary, null, 2));
-  console.log(`\nFull results saved → ${outPath}`);
-  console.log(`                  ↘ ${RESULT_DIR}/latest.json (always overwritten)`);
-}
-
-function printReportCard(results) {
   console.log("\n═══════════════════════════════════════════════════════════");
   console.log("  Report Card");
-  console.log("═══════════════════════════════════════════════════════════\n");
-  const colHeader = ["Symbol".padEnd(12), ...TIMEFRAMES.map((t) => t.padEnd(15))];
-  console.log("  " + colHeader.join(""));
-  console.log("  " + "─".repeat(colHeader.join("").length));
-
-  for (const r of results) {
-    if (r.error) {
-      console.log(
-        "  " + r.label.padEnd(12) + ` (skipped: ${r.error})`,
-      );
-      continue;
-    }
-    const cells = TIMEFRAMES.map((tf) => {
-      const c = r.cells.find((x) => x.timeframe === tf);
-      if (!c) return "—".padEnd(15);
-      const score = c.visual?.score ?? "—";
-      const tag =
-        c.overall === "PASS"
-          ? `✅ PASS(${score})`
-          : c.overall === "error"
-            ? "⚠️  ERR"
-            : c.overall === "skipped"
-              ? "⏭  SKIP"
-              : `reject(${score})`;
-      return tag.padEnd(15);
-    });
-    console.log("  " + r.label.padEnd(12) + cells.join(""));
-  }
-
-  // Summary line
-  const passes = [];
-  for (const r of results) {
-    if (r.error) continue;
-    for (const c of r.cells) {
-      if (c.overall === "PASS") {
-        passes.push(`${r.label} @ ${c.timeframe}`);
-      }
-    }
-  }
+  console.log("═══════════════════════════════════════════════════════════");
+  for (const r of results) console.log(summaryLine(r));
+  const allTriggers = results.filter((r) => r.triggers && r.triggers.length > 0);
   console.log("");
-  if (passes.length === 0) {
-    console.log("  No setups passed both gates this scan.");
+  if (allTriggers.length === 0) {
+    console.log("  No entry signals this scan.");
   } else {
-    console.log(`  ✅ ${passes.length} setup(s) passed:`);
-    passes.forEach((p) => console.log(`     - ${p}`));
-  }
-}
-
-// ─── DEEP SCAN — single symbol, 6 timeframes, HTF aggregation ───────────
-
-// Reads only `direction` from a TF cell — used for HTF bias agreement.
-function dirOf(cell) {
-  return cell?.visual?.direction || "none";
-}
-
-function htfAgree(monthly, weekly, daily) {
-  const dirs = [dirOf(monthly), dirOf(weekly), dirOf(daily)];
-  if (dirs.some((d) => d === "none" || d == null)) return null;
-  return dirs.every((d) => d === dirs[0]) ? dirs[0] : null;
-}
-
-// Visual-only cell evaluation (no numeric gate). Used for non-Binance symbols
-// in deep scan. Returns the same shape as evaluateCell for compat.
-async function evaluateVisualCell(client, item, tf, options) {
-  const { rubricTemplate, minLlmScore } = options;
-  const slug = slugify(item.label);
-  const cell = {
-    label: item.label,
-    tv_symbol: item.tv_symbol,
-    timeframe: tf,
-    numeric: { skipped: true, reason: "deep_scan_visual_only" },
-    visual: { skipped: true, reason: "not_run" },
-    overall: "skip",
-    notes: [],
-  };
-
-  await setTimeframe(client, tf);
-  await dismissPopups(client);
-  const stateAfter = await getChartState(client);
-  if (stateAfter?.resolution) cell.actualResolution = stateAfter.resolution;
-
-  const imagePath = await captureSymbolTf(client, slug, tf);
-  cell.imagePath = imagePath;
-
-  const spentToday = getTodaysCost();
-  const maxSpend = parseFloat(process.env.MAX_LLM_SPEND_USD_PER_DAY || "2");
-  if (spentToday >= maxSpend) {
-    cell.visual = {
-      skipped: true,
-      reason: `daily_budget_exhausted ($${spentToday.toFixed(2)}/$${maxSpend})`,
-    };
-    return cell;
-  }
-
-  const prompt = fillRubric(rubricTemplate, {
-    SYMBOL: item.label,
-    TIMEFRAME: tf,
-  });
-
-  try {
-    const { result, costUSD, model } = await askGeminiVision({
-      imagePath,
-      prompt,
-      model: process.env.VISUAL_MODEL || "gemini-2.5-flash",
-    });
-    recordCost(costUSD);
-
-    const visConfirm =
-      result.direction !== "none" &&
-      result.angle_ok === true &&
-      result.price_at_zone === true &&
-      result.coc_present === true &&
-      result.confirm_candle != null &&
-      (result.red_flags?.length ?? 0) === 0 &&
-      (result.score ?? 0) >= minLlmScore;
-
-    cell.visual = { skipped: false, ...result, costUSD, model, confirm: visConfirm };
-    cell.overall = visConfirm ? "PASS" : "reject";
-  } catch (err) {
-    cell.visual = { skipped: true, reason: `error: ${err.message}` };
-    cell.overall = "error";
-    cell.notes.push(`visual error: ${err.message}`);
-  }
-
-  return cell;
-}
-
-export async function runDeepScan(symbolLabel, tvSymbol, options = {}) {
-  const rubricTemplate = readFileSync(
-    options.rubricPath || "prompts/scan-rubric.md",
-    "utf8",
-  );
-  const minLlmScore = parseInt(process.env.MIN_LLM_SCORE || "7");
-  const item = {
-    label: symbolLabel,
-    tv_symbol: tvSymbol,
-    binance_symbol: null,
-  };
-
-  const startedAt = new Date().toISOString();
-  console.log(
-    `\n═══════════════════════════════════════════════════════════\n` +
-      `  Deep scan: ${symbolLabel} (${tvSymbol})\n` +
-      `  Timeframes: ${HTF_TIMEFRAMES.join(", ")} (HTF bias) + ` +
-      `${ENTRY_TIMEFRAMES.join(", ")} (entry candidates)\n` +
-      `  Started: ${startedAt}\n` +
-      `═══════════════════════════════════════════════════════════\n`,
-  );
-
-  let client;
-  const allCells = [];
-
-  try {
-    client = await openTvClient();
-    await setSymbol(client, tvSymbol);
-    await dismissPopups(client);
-    const state = await getChartState(client);
-    if (state) console.log(`  chart now showing: ${state.symbol} @ ${state.resolution}\n`);
-
-    for (const tf of [...HTF_TIMEFRAMES, ...ENTRY_TIMEFRAMES]) {
-      process.stdout.write(`  ${tf} ...`);
-      const cell = await evaluateVisualCell(client, item, tf, {
-        rubricTemplate,
-        minLlmScore,
-      });
-      allCells.push(cell);
-      const dir = cell.visual?.direction ?? "—";
-      const score = cell.visual?.score ?? "—";
-      console.log(` dir=${dir}  score=${score}`);
-    }
-  } finally {
-    await closeTvClient(client);
-  }
-
-  // Aggregate HTF bias and decide entry
-  const monthly = allCells.find((c) => c.timeframe === "1M");
-  const weekly = allCells.find((c) => c.timeframe === "1W");
-  const daily = allCells.find((c) => c.timeframe === "1D");
-  const htfDirection = htfAgree(monthly, weekly, daily);
-
-  const entryCells = allCells.filter((c) => ENTRY_TIMEFRAMES.includes(c.timeframe));
-  const validEntries = [];
-  for (const c of entryCells) {
-    const v = c.visual ?? {};
-    if (
-      htfDirection &&
-      v.direction === htfDirection &&
-      v.angle_ok === true &&
-      v.price_at_zone === true &&
-      v.coc_present === true &&
-      v.confirm_candle != null &&
-      (v.red_flags?.length ?? 0) === 0 &&
-      (v.score ?? 0) >= minLlmScore
-    ) {
-      validEntries.push(c);
+    console.log(`  ✅ ${allTriggers.length} symbol(s) with entry signals:`);
+    for (const r of allTriggers) {
+      console.log(`     - ${r.symbol} (${r.htf_bias}) → ${r.triggers.join(", ")}`);
     }
   }
 
-  printDeepReport(symbolLabel, allCells, htfDirection, validEntries);
-
-  if (!existsSync(RESULT_DIR)) mkdirSync(RESULT_DIR, { recursive: true });
-  const stamp = startedAt.replace(/[:.]/g, "-");
-  const outPath = `${RESULT_DIR}/deep-${slugify(symbolLabel)}-${stamp}.json`;
   const summary = {
-    type: "deep",
-    label: symbolLabel,
-    tv_symbol: tvSymbol,
-    startedAt,
-    finishedAt: new Date().toISOString(),
-    htfDirection,
-    cells: allCells,
-    validEntries: validEntries.map((c) => ({
-      timeframe: c.timeframe,
-      direction: c.visual.direction,
-      score: c.visual.score,
-      candle: c.visual.confirm_candle,
-    })),
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    results,
   };
-  writeFileSync(outPath, JSON.stringify(summary, null, 2));
-  writeFileSync(`${RESULT_DIR}/latest-deep.json`, JSON.stringify(summary, null, 2));
-  console.log(`\nFull results saved → ${outPath}`);
-}
-
-function printDeepReport(label, cells, htfDirection, validEntries) {
-  console.log("\n═══════════════════════════════════════════════════════════");
-  console.log(`  Deep Report — ${label}`);
-  console.log("═══════════════════════════════════════════════════════════\n");
-
-  console.log("  HTF BIAS (Monthly / Weekly / Daily)");
-  console.log("  ──────────────────────────────────────────────");
-  for (const tf of HTF_TIMEFRAMES) {
-    const c = cells.find((x) => x.timeframe === tf);
-    const v = c?.visual ?? {};
-    const flagsTxt = (v.red_flags?.length ? ` flags=[${v.red_flags.join(",")}]` : "");
-    console.log(
-      `    ${tf.padEnd(4)}  dir=${(v.direction ?? "—").padEnd(8)}  ` +
-        `angle_ok=${String(v.angle_ok ?? "—").padEnd(5)}  score=${v.score ?? "—"}${flagsTxt}`,
-    );
-  }
-  console.log("");
-  if (htfDirection) {
-    console.log(`  ✅ HTF AGREE: ${htfDirection.toUpperCase()}`);
-  } else {
-    console.log(`  🚫 HTF DISAGREE — no trade regardless of entry TFs`);
-  }
-
-  console.log("\n  ENTRY CANDIDATES (4H / 2H / 1H — looking for confirmation)");
-  console.log("  ──────────────────────────────────────────────");
-  for (const tf of ENTRY_TIMEFRAMES) {
-    const c = cells.find((x) => x.timeframe === tf);
-    const v = c?.visual ?? {};
-    const matches = htfDirection && v.direction === htfDirection;
-    const allOK =
-      matches &&
-      v.angle_ok &&
-      v.price_at_zone &&
-      v.coc_present &&
-      v.confirm_candle != null &&
-      (v.red_flags?.length ?? 0) === 0 &&
-      (v.score ?? 0) >= 7;
-    const tag = allOK ? "✅ ENTRY" : matches ? "○ aligned, weak" : "✗ misaligned";
-    console.log(
-      `    ${tf.padEnd(4)}  dir=${(v.direction ?? "—").padEnd(8)}  ` +
-        `zone=${String(v.price_at_zone ?? "—").padEnd(5)}  ` +
-        `coc=${String(v.coc_present ?? "—").padEnd(5)}  ` +
-        `candle=${(v.confirm_candle ?? "—").toString().padEnd(10)}  ` +
-        `score=${(v.score ?? "—").toString().padEnd(3)}  ${tag}`,
-    );
-  }
-
-  console.log("\n  ──────────────────────────────────────────────");
-  if (validEntries.length === 0) {
-    console.log(`  🚫 NO VALID ENTRY for ${label} right now`);
-    if (!htfDirection) {
-      console.log(`     Reason: HTFs don't agree on direction`);
-    } else {
-      console.log(
-        `     Reason: HTFs say ${htfDirection.toUpperCase()}, but no entry TF` +
-          ` showed all conditions met (angle + zone + CoC + confirm candle + score≥7)`,
-      );
-    }
-  } else {
-    console.log(`  ✅ ENTRY SIGNAL on ${validEntries.length} TF(s):`);
-    for (const c of validEntries) {
-      console.log(
-        `     ${c.timeframe} → ${c.visual.direction.toUpperCase()}  ` +
-          `(score ${c.visual.score}, ${c.visual.confirm_candle} candle)`,
-      );
-      console.log(`     reasoning: ${c.visual.reasoning}`);
-    }
-  }
-  console.log("");
+  const path = saveResult("scan", "watchlist", summary);
+  console.log(`\nFull results saved → ${path}`);
+  return summary;
 }
