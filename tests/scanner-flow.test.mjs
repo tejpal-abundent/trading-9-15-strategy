@@ -24,8 +24,9 @@ test("ltfCellPass: 3 of 3 signals + score 10 → pass", () => {
   assert.equal(ltfCellPass(cell), true);
 });
 
-test("ltfCellPass: 1 of 3 signals + score 10 → fail", () => {
+test("ltfCellPass: 1 of 4 signals + score 10 → fail", () => {
   const cell = {
+    angle_ok: false,
     zone_rejection: true,
     coc_present: false,
     strong_candle_in_bias: false,
@@ -33,6 +34,42 @@ test("ltfCellPass: 1 of 3 signals + score 10 → fail", () => {
     score: 10,
   };
   assert.equal(ltfCellPass(cell), false);
+});
+
+test("ltfCellPass: angle_ok + zone_rejection + score 8 → pass (no candle, no CoC)", () => {
+  const cell = {
+    angle_ok: true,
+    zone_rejection: true,
+    coc_present: false,
+    strong_candle_in_bias: false,
+    red_flags: [],
+    score: 8,
+  };
+  assert.equal(ltfCellPass(cell), true);
+});
+
+test("ltfCellPass: angle_ok alone + score 10 → fail (only 1 signal)", () => {
+  const cell = {
+    angle_ok: true,
+    zone_rejection: false,
+    coc_present: false,
+    strong_candle_in_bias: false,
+    red_flags: [],
+    score: 10,
+  };
+  assert.equal(ltfCellPass(cell), false);
+});
+
+test("ltfCellPass: 4 of 4 signals + score 8 → pass", () => {
+  const cell = {
+    angle_ok: true,
+    zone_rejection: true,
+    coc_present: true,
+    strong_candle_in_bias: true,
+    red_flags: [],
+    score: 8,
+  };
+  assert.equal(ltfCellPass(cell), true);
 });
 
 test("ltfCellPass: 2 of 3 signals + score 7 → fail (score too low)", () => {

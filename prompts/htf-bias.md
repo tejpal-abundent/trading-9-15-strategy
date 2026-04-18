@@ -9,17 +9,17 @@ Return **pure JSON only** (no prose, no markdown fences).
 
 ### Step 1 — Decide the direction yourself
 
-Look at the slope of EMA9 and EMA15 over the last several bars:
+Look at how the EMAs have been moving over the **most recent 10–20 bars** (the rightmost portion of the chart):
 
-- Both EMAs sloping UP at a visibly steep angle (>~40°) **AND** EMA9 above EMA15 → `"long"`
-- Both EMAs sloping DOWN steeply (>~40°) **AND** EMA9 below EMA15 → `"short"`
-- Slope shallow, EMAs flat/crossed/tangled, or unclear → `"none"`
+- EMA9 above EMA15 **AND** both rising over the last ~10 bars → `"long"`
+- EMA9 below EMA15 **AND** both falling over the last ~10 bars → `"short"`
+- EMAs flat, tangled, or just changed direction with no commitment → `"none"`
 
 If `direction === "none"`, set every other field to false/null/empty and `score = 0`. Do not grade further.
 
 ### Step 2 — Grade the bias structure
 
-3. **slope_ok** *(boolean)* — EMA9 and EMA15 slopes confirmed >40° in the chosen direction.
+3. **angle_ok** *(boolean)* — Measure the steepness of the EMA9/EMA15 line at the **most recent pullback turning point** (the swing low for longs, swing high for shorts where price touched the EMA band and then resumed in the bias direction). Mentally draw a horizontal line at that turning point and a tangent along the EMA forward from there. The angle between them must be **≥ 30–40°**. A gentle slope (10–20°) → `false`. Don't measure the slope at the rightmost edge — measure where the EMA bounced off the pullback.
 
 4. **pullback_present** *(boolean)* — Has price recently pulled INTO the EMA9–EMA15 band (a healthy retracement, not an extended run away from it)? True if the last several candles touched or closed within the band.
 
@@ -40,7 +40,7 @@ If `direction === "none"`, set every other field to false/null/empty and `score 
 ```json
 {
   "direction": "long" | "short" | "none",
-  "slope_ok": bool,
+  "angle_ok": bool,
   "pullback_present": bool,
   "ema_stack_ok": bool,
   "red_flags": [],

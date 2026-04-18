@@ -25,11 +25,13 @@ export function slugify(label) {
 }
 
 // Whether an LTF cell passes the entry filter:
-// at least 2 of {zone_rejection, coc_present, strong_candle_in_bias},
-// no red flags, and score >= 8.
+// at least 2 of {angle_ok, zone_rejection, coc_present, strong_candle_in_bias},
+// no red flags, and score >= 8. angle_ok is treated as a "plus" signal —
+// it counts toward the pool but isn't required on its own.
 export function ltfCellPass(cell) {
   if (!cell || typeof cell !== "object") return false;
   const signals =
+    (cell.angle_ok ? 1 : 0) +
     (cell.zone_rejection ? 1 : 0) +
     (cell.coc_present ? 1 : 0) +
     (cell.strong_candle_in_bias ? 1 : 0);
@@ -126,7 +128,7 @@ async function evaluateHtfCell(client, item, tf, rubric) {
   return {
     tf,
     direction: result.direction,
-    slope_ok: !!result.slope_ok,
+    angle_ok: !!result.angle_ok,
     pullback_present: !!result.pullback_present,
     ema_stack_ok: !!result.ema_stack_ok,
     score: result.score ?? 0,
@@ -163,6 +165,7 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
 
   const cell = {
     tf,
+    angle_ok: !!result.angle_ok,
     zone_rejection: !!result.zone_rejection,
     coc_present: !!result.coc_present,
     strong_candle_in_bias: !!result.strong_candle_in_bias,
@@ -174,6 +177,7 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
     model,
   };
   cell.signals_count =
+    (cell.angle_ok ? 1 : 0) +
     (cell.zone_rejection ? 1 : 0) +
     (cell.coc_present ? 1 : 0) +
     (cell.strong_candle_in_bias ? 1 : 0);
