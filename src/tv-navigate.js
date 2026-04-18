@@ -71,17 +71,6 @@ export async function closeTvClient(client) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Send a single character to TV (used for typing symbol names).
-async function typeText(client, text) {
-  for (const char of text) {
-    await client.Input.dispatchKeyEvent({
-      type: "char",
-      text: char,
-    });
-    await sleep(20);
-  }
-}
-
 async function pressKey(client, { key, code, windowsVirtualKeyCode }) {
   await client.Input.dispatchKeyEvent({
     type: "keyDown",
@@ -134,25 +123,6 @@ export async function dismissPopups(client) {
   }).catch(() => {});
 
   await sleep(200);
-}
-
-// Extract just the bare symbol part (e.g. "BINANCE:BTCUSDT" → "BTCUSDT")
-// for matching the title bar, which only shows the ticker not the exchange.
-function bareTicker(tvSymbol) {
-  return tvSymbol.includes(":") ? tvSymbol.split(":")[1] : tvSymbol;
-}
-
-// Wait until document.title contains a substring (case-insensitive),
-// up to maxWaitMs. Returns true on match, false on timeout.
-async function waitForTitle(client, substring, maxWaitMs = 6000, intervalMs = 250) {
-  const deadline = Date.now() + maxWaitMs;
-  const re = new RegExp(substring.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-  while (Date.now() < deadline) {
-    const title = await readChartTitle(client);
-    if (re.test(title)) return true;
-    await sleep(intervalMs);
-  }
-  return false;
 }
 
 // Switch chart to {tvSymbol} using TradingView's exposed widget API. Same
@@ -223,13 +193,6 @@ const TF_TO_RESOLUTION = {
   "1D": "D",   "1W": "W",   "1M": "M",
 };
 
-// What chart.resolution() returns AFTER setResolution() — sometimes prefixed.
-const TF_RESOLUTION_REPORTED = {
-  "1m": "1",   "3m": "3",   "5m": "5",   "15m": "15",  "30m": "30",
-  "1H": "60",  "2H": "120", "4H": "240", "6H": "360",  "12H": "720",
-  "1D": "1D",  "1W": "1W",  "1M": "1M",
-};
-
 // What the active interval-toolbar button shows for each TF. The toolbar
 // updates AFTER the chart visually re-renders — chart.resolution() updates
 // instantly even when the visible chart hasn't changed yet, so the toolbar
@@ -248,134 +211,6 @@ function legendMatches(tf, seen) {
 }
 
 // Read the chart's current symbol + TF from TV's chart-legend DOM elements.
-// document.title is the browser tab — unreliable for chart state. The legend
-// at top-left always shows "<SYMBOL> · <RES> · <EXCHANGE>" — query that.
-async function readChartTitle(client) {
-  const { result } = await client.Runtime.evaluate({
-    expression: `
-      (function() {
-        // Try several known TradingView legend selectors, in order of preference.
-        const selectors = [
-          '[data-name="legend-source-title"]',
-          '[class*="mainTitle"]',
-          '[class*="legendMainSourceWrapper"]',
-          '[data-name="legend-source-item"]',
-        ];
-        const parts = [];
-        for (const sel of selectors) {
-          const els = document.querySelectorAll(sel);
-          for (const el of els) {
-            const t = (el.innerText || '').trim();
-            if (t) parts.push(t);
-          }
-          if (parts.length) break;
-        }
-        // Add document.title as a fallback signal too — it sometimes updates.
-        if (document.title) parts.push(document.title);
-        return parts.join(' | ');
-      })()
-    `,
-    returnByValue: true,
-  });
-  return result.value || "";
-}
-
-// Locate the toolbar button for a given TF and click it. Uses TradingView's
-// React-synthetic-event-friendly programmatic .click() — CDP raw mouse events
-// don't trigger TV's React handlers.
-async function clickToolbarTfButton(client, buttonText) {
-  const { result } = await client.Runtime.evaluate({
-    expression: `
-      (function() {
-        const wanted = ${JSON.stringify(buttonText)};
-        let target = null;
-        let source = '';
-
-        // Strategy 1: TradingView's known interval-toolbar
-        const tvSelectors = [
-          '[data-name="header-toolbar-intervals"] button',
-          '[id*="header-toolbar-intervals"] button',
-        ];
-        for (const sel of tvSelectors) {
-          const els = Array.from(document.querySelectorAll(sel));
-          target = els.find(el => (el.innerText || '').trim() === wanted);
-          if (target) { source = 'tv_selector:' + sel; break; }
-        }
-
-        // Strategy 2: any top-toolbar button by text
-        if (!target) {
-          const all = Array.from(document.querySelectorAll('button, [role="button"]'));
-          const cands = all.filter(b => {
-            const t = (b.innerText || '').trim();
-            if (t !== wanted) return false;
-            const r = b.getBoundingClientRect();
-            return r.width > 0 && r.height > 0 && r.top < 60;
-          });
-          cands.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
-          target = cands[0] || null;
-          if (target) source = 'top_toolbar_text:' + cands.length + 'candidates';
-        }
-
-        if (!target) return null;
-        const r = target.getBoundingClientRect();
-
-        // Programmatic click — fires React's synthetic event system. Plus a
-        // mousedown/mouseup pair for sites that need full event sequence.
-        try { target.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
-        const opts = { bubbles: true, cancelable: true, view: window, button: 0 };
-        target.dispatchEvent(new MouseEvent('pointerover', opts));
-        target.dispatchEvent(new MouseEvent('mouseover', opts));
-        target.dispatchEvent(new MouseEvent('pointerdown', opts));
-        target.dispatchEvent(new MouseEvent('mousedown', opts));
-        target.dispatchEvent(new MouseEvent('pointerup', opts));
-        target.dispatchEvent(new MouseEvent('mouseup', opts));
-        target.dispatchEvent(new MouseEvent('click', opts));
-        try { target.click(); } catch (e) {}
-
-        return JSON.stringify({
-          x: r.left + r.width / 2,
-          y: r.top + r.height / 2,
-          source,
-          dispatched: true,
-        });
-      })()
-    `,
-    returnByValue: true,
-  });
-  if (!result.value) return null;
-  return JSON.parse(result.value);
-}
-
-// Check whether the toolbar button for `buttonText` is currently in "active"
-// state — TradingView toggles a class containing "isActive" or sets
-// aria-pressed="true" on the selected TF button.
-async function isTfButtonActive(client, buttonText) {
-  const { result } = await client.Runtime.evaluate({
-    expression: `
-      (function() {
-        const wanted = ${JSON.stringify(buttonText)};
-        const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-        for (const b of buttons) {
-          const t = (b.innerText || '').trim();
-          if (t !== wanted) continue;
-          const r = b.getBoundingClientRect();
-          if (r.top > 200) continue;  // not in toolbar
-          const cls = (b.className || '').toString().toLowerCase();
-          const ap  = (b.getAttribute('aria-pressed') || '').toLowerCase();
-          const ac  = (b.getAttribute('data-active') || '').toLowerCase();
-          if (cls.includes('isactive') || cls.includes('active') ||
-              ap === 'true' || ac === 'true') {
-            return true;
-          }
-        }
-        return false;
-      })()
-    `,
-    returnByValue: true,
-  }).catch(() => ({ result: { value: false } }));
-  return !!result.value;
-}
-
 // Read the active TF from TradingView's UI. Two complementary signals:
 //   1. Top-toolbar interval button with `isActive-` class — most reliable
 //   2. Chart legend text ("4h" line in legendMainSourceWrapper) — fallback
@@ -491,13 +326,31 @@ export async function setTimeframe(client, timeframe) {
 // Capture the current chart state into a PNG file under
 // `screenshots/{slug}/{tf}.png`. Slug is filesystem-safe label.
 // Re-confirms the legend reflects the requested timeframe before capturing
-// so we never save a stale chart from the previous TF.
-export async function captureSymbolTf(client, slug, timeframe) {
+// so we never save a stale chart from the previous TF. Optionally verifies
+// the symbol matches `expectedSymbol` and re-asserts it if it has drifted
+// (e.g., user clicked a different watchlist item mid-scan).
+export async function captureSymbolTf(client, slug, timeframe, expectedSymbol = null) {
   const dir = resolve("screenshots", slug);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const path = resolve(dir, `${timeframe}.png`);
 
   await dismissPopups(client);
+
+  // Defensive: if the user clicked a different symbol while we were scanning,
+  // re-set the symbol back to what this cell expects.
+  if (expectedSymbol) {
+    const { result: cur } = await client.Runtime.evaluate({
+      expression: `(function() { try { return ${CHART_API}.symbol(); } catch (e) { return null; } })()`,
+      returnByValue: true,
+    }).catch(() => ({ result: { value: null } }));
+    if (cur.value && cur.value.toUpperCase() !== expectedSymbol.toUpperCase()) {
+      console.log(
+        `      [capture: symbol drifted to '${cur.value}', expected ${expectedSymbol} — re-setting]`,
+      );
+      await setSymbol(client, expectedSymbol);
+      await setTimeframe(client, timeframe);
+    }
+  }
 
   if (TF_LEGEND_LABEL[timeframe]) {
     const { ok, saw } = await waitForLegendTf(client, timeframe, 4000);
@@ -509,6 +362,29 @@ export async function captureSymbolTf(client, slug, timeframe) {
       await setTimeframe(client, timeframe);
     }
   }
+
+  // Force the page to the front. When TV Desktop is in the background, the
+  // GPU compositor throttles paints and Page.captureScreenshot returns a
+  // stale frame (chart's internal state is correct but the canvas hasn't
+  // been redrawn). bringToFront wakes the renderer.
+  await client.Page.bringToFront().catch(() => {});
+
+  // bringToFront alone isn't enough after the first screenshot — the chart
+  // canvas only repaints in response to user interaction. Send a tiny
+  // mouseMove over the chart area to invalidate the canvas region.
+  await client.Input.dispatchMouseEvent({
+    type: "mouseMoved",
+    x: 400,
+    y: 300,
+    button: "none",
+  }).catch(() => {});
+  await sleep(150);
+  await client.Input.dispatchMouseEvent({
+    type: "mouseMoved",
+    x: 410,
+    y: 305,
+    button: "none",
+  }).catch(() => {});
 
   // Extra settle time so candles fully render before capture
   await sleep(1000);

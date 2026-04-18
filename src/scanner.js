@@ -110,7 +110,7 @@ async function evaluateHtfCell(client, item, tf, rubric) {
   const slug = slugify(item.label);
   await setTimeframe(client, tf);
   await dismissPopups(client);
-  const imagePath = await captureSymbolTf(client, slug, tf);
+  const imagePath = await captureSymbolTf(client, slug, tf, item.tv_symbol);
 
   const prompt = fillRubric(rubric, { SYMBOL: item.label, TIMEFRAME: tf });
   const { result, costUSD, model } = await askGeminiVision({
@@ -141,7 +141,7 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
   const slug = slugify(item.label);
   await setTimeframe(client, tf);
   await dismissPopups(client);
-  const imagePath = await captureSymbolTf(client, slug, tf);
+  const imagePath = await captureSymbolTf(client, slug, tf, item.tv_symbol);
 
   const prompt = fillRubric(rubric, {
     SYMBOL: item.label,
