@@ -30,6 +30,19 @@ export function slugify(label) {
   return label.replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
+// Whether an LTF cell passes the entry filter:
+// at least 2 of {zone_rejection, coc_present, strong_candle_in_bias},
+// no red flags, and score >= 8.
+export function ltfCellPass(cell) {
+  if (!cell || typeof cell !== "object") return false;
+  const signals =
+    (cell.zone_rejection ? 1 : 0) +
+    (cell.coc_present ? 1 : 0) +
+    (cell.strong_candle_in_bias ? 1 : 0);
+  const noFlags = !cell.red_flags || cell.red_flags.length === 0;
+  return signals >= 2 && noFlags && (cell.score ?? 0) >= 8;
+}
+
 function loadWatchlist(path = "watchlist.json") {
   if (!existsSync(path)) {
     throw new Error(`watchlist.json not found at ${path}`);
