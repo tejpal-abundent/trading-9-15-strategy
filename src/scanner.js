@@ -43,6 +43,41 @@ export function ltfCellPass(cell) {
   return signals >= 2 && noFlags && (cell.score ?? 0) >= 8;
 }
 
+// HTF_TIMEFRAMES order is fixed: index 0 = 1M, 1 = 1W, 2 = 1D.
+// Cells passed in must be in that order; result.stopAt names the TF that failed.
+const HTF_LABELS = ["1M", "1W", "1D"];
+
+export function evaluateHtfChain(cells, opts = {}) {
+  const minPerScore = opts.minPerScore ?? 6;
+  const minAvgScore = opts.minAvgScore ?? 7;
+
+  let firstDir = null;
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i];
+    const tf = HTF_LABELS[i] ?? `htf_${i}`;
+    const dir = cell?.direction;
+    const score = cell?.score ?? 0;
+
+    if (!dir || dir === "none") {
+      return { stopped: true, stopAt: tf, stopReason: "no_trend", htfBias: null, avgScore: null };
+    }
+    if (score < minPerScore) {
+      return { stopped: true, stopAt: tf, stopReason: "htf_quality_low", htfBias: null, avgScore: null };
+    }
+    if (firstDir == null) {
+      firstDir = dir;
+    } else if (dir !== firstDir) {
+      return { stopped: true, stopAt: tf, stopReason: "htf_disagree", htfBias: null, avgScore: null };
+    }
+  }
+
+  const avgScore = cells.reduce((s, c) => s + (c.score ?? 0), 0) / cells.length;
+  if (avgScore < minAvgScore) {
+    return { stopped: true, stopAt: null, stopReason: "htf_avg_low", htfBias: null, avgScore };
+  }
+  return { stopped: false, stopAt: null, stopReason: null, htfBias: firstDir, avgScore };
+}
+
 function loadWatchlist(path = "watchlist.json") {
   if (!existsSync(path)) {
     throw new Error(`watchlist.json not found at ${path}`);
