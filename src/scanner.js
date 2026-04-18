@@ -24,40 +24,57 @@ export function slugify(label) {
   return label.replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
-// Whether an LTF cell passes the entry filter:
-// at least 2 of {angle_ok, zone_rejection, coc_present, strong_candle_in_bias},
-// no red flags, and score >= 8. angle_ok is treated as a "plus" signal —
-// it counts toward the pool but isn't required on its own.
+// Whether an LTF cell passes the entry filter. Two doors:
+//   Door A — Structural: at least 2 of 5 signals AND score >= 8
+//     (signals: angle_ok, zone_rejection, coc_present, strong_candle_in_bias, solid_continuation)
+//   Door B — Probabilistic: probability_next_candle_in_bias >= 75
+// Either door is sufficient. red_flags must be empty for either door to fire.
 export function ltfCellPass(cell) {
   if (!cell || typeof cell !== "object") return false;
+  const noFlags = !cell.red_flags || cell.red_flags.length === 0;
+  if (!noFlags) return false;
   const signals =
     (cell.angle_ok ? 1 : 0) +
     (cell.zone_rejection ? 1 : 0) +
     (cell.coc_present ? 1 : 0) +
-    (cell.strong_candle_in_bias ? 1 : 0);
-  const noFlags = !cell.red_flags || cell.red_flags.length === 0;
-  return signals >= 2 && noFlags && (cell.score ?? 0) >= 8;
+    (cell.strong_candle_in_bias ? 1 : 0) +
+    (cell.solid_continuation ? 1 : 0);
+  const structuralPass = signals >= 2 && (cell.score ?? 0) >= 8;
+  const probabilityPass =
+    (cell.probability_next_candle_in_bias ?? 0) >= 75;
+  return structuralPass || probabilityPass;
 }
 
 // HTF_TIMEFRAMES order is fixed: index 0 = 1M, 1 = 1W, 2 = 1D.
 // Cells passed in must be in that order; result.stopAt names the TF that failed.
 const HTF_LABELS = ["1M", "1W", "1D"];
 
-export function evaluateHtfChain(cells, opts = {}) {
-  const minPerScore = opts.minPerScore ?? 6;
-  const minAvgScore = opts.minAvgScore ?? 7;
+// Whether one HTF cell passes its individual quality gate. Two doors:
+//   Door A — Structural: score >= minPerScore (default 7)
+//   Door B — Probabilistic: probability_next_candle_in_bias >= minPerProb (default 75)
+// red_flags must be empty for either door to fire.
+function htfCellPass(cell, opts = {}) {
+  const minPerScore = opts.minPerScore ?? 7;
+  const minPerProb = opts.minPerProb ?? 75;
+  const noFlags = !cell?.red_flags || cell.red_flags.length === 0;
+  if (!noFlags) return false;
+  return (
+    (cell.score ?? 0) >= minPerScore ||
+    (cell.probability_next_candle_in_bias ?? 0) >= minPerProb
+  );
+}
 
+export function evaluateHtfChain(cells, opts = {}) {
   let firstDir = null;
   for (let i = 0; i < cells.length; i++) {
     const cell = cells[i];
     const tf = HTF_LABELS[i] ?? `htf_${i}`;
     const dir = cell?.direction;
-    const score = cell?.score ?? 0;
 
     if (!dir || dir === "none") {
       return { stopped: true, stopAt: tf, stopReason: "no_trend", htfBias: null, avgScore: null };
     }
-    if (score < minPerScore) {
+    if (!htfCellPass(cell, opts)) {
       return { stopped: true, stopAt: tf, stopReason: "htf_quality_low", htfBias: null, avgScore: null };
     }
     if (firstDir == null) {
@@ -68,9 +85,6 @@ export function evaluateHtfChain(cells, opts = {}) {
   }
 
   const avgScore = cells.reduce((s, c) => s + (c.score ?? 0), 0) / cells.length;
-  if (avgScore < minAvgScore) {
-    return { stopped: true, stopAt: null, stopReason: "htf_avg_low", htfBias: null, avgScore };
-  }
   return { stopped: false, stopAt: null, stopReason: null, htfBias: firstDir, avgScore };
 }
 
@@ -128,9 +142,13 @@ async function evaluateHtfCell(client, item, tf, rubric) {
   return {
     tf,
     direction: result.direction,
+    setup_type: result.setup_type ?? "none",
     angle_ok: !!result.angle_ok,
     pullback_present: !!result.pullback_present,
     ema_stack_ok: !!result.ema_stack_ok,
+    solid_continuation: !!result.solid_continuation,
+    probability_next_candle_in_bias:
+      result.probability_next_candle_in_bias ?? 0,
     score: result.score ?? 0,
     red_flags: result.red_flags ?? [],
     reasoning: result.reasoning ?? "",
@@ -165,10 +183,14 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
 
   const cell = {
     tf,
+    setup_type: result.setup_type ?? "none",
     angle_ok: !!result.angle_ok,
     zone_rejection: !!result.zone_rejection,
     coc_present: !!result.coc_present,
     strong_candle_in_bias: !!result.strong_candle_in_bias,
+    solid_continuation: !!result.solid_continuation,
+    probability_next_candle_in_bias:
+      result.probability_next_candle_in_bias ?? 0,
     score: result.score ?? 0,
     red_flags: result.red_flags ?? [],
     reasoning: result.reasoning ?? "",
@@ -180,7 +202,8 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
     (cell.angle_ok ? 1 : 0) +
     (cell.zone_rejection ? 1 : 0) +
     (cell.coc_present ? 1 : 0) +
-    (cell.strong_candle_in_bias ? 1 : 0);
+    (cell.strong_candle_in_bias ? 1 : 0) +
+    (cell.solid_continuation ? 1 : 0);
   cell.pass = ltfCellPass(cell);
   return cell;
 }
