@@ -143,6 +143,7 @@ async function evaluateHtfCell(client, item, tf, rubric) {
     tf,
     direction: result.direction,
     setup_type: result.setup_type ?? "none",
+    latest_candle: result.latest_candle ?? null,
     angle_ok: !!result.angle_ok,
     pullback_present: !!result.pullback_present,
     ema_stack_ok: !!result.ema_stack_ok,
@@ -184,6 +185,7 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
   const cell = {
     tf,
     setup_type: result.setup_type ?? "none",
+    latest_candle: result.latest_candle ?? null,
     angle_ok: !!result.angle_ok,
     zone_rejection: !!result.zone_rejection,
     coc_present: !!result.coc_present,

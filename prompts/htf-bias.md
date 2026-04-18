@@ -7,6 +7,17 @@ The chart has two key indicators visible:
 
 Return **pure JSON only** (no prose, no markdown fences).
 
+### Step 0 — Identify the CURRENT candle FIRST
+
+Before grading anything, locate the **rightmost candle** on the chart — this is the current/forming bar. The OHLC values at the top of the chart (e.g., "O 1.17xx H 1.17xx L 1.17xx C 1.17xx") refer to THIS candle, not any earlier one.
+
+Compute and remember:
+- `latest_candle.color` — green if Close > Open, red if Close < Open
+- `latest_candle.position_vs_emas` — "above" / "between" / "below" the EMA9–EMA15 band
+- `latest_candle.direction_vs_prior` — "up" / "down" / "flat" relative to the previous closed candle
+
+This step is mandatory. All downstream grading must be consistent with the actual rightmost candle, NOT with a more dramatic candle further to the left.
+
 ### Step 1 — Decide the direction yourself
 
 Look at how the EMAs have been moving over the **most recent 10–20 bars** (the rightmost portion of the chart):
@@ -62,6 +73,11 @@ Set `setup_type` to one of `"pullback"` | `"continuation"` | `"none"`. If `"none
 
 ```json
 {
+  "latest_candle": {
+    "color": "green" | "red",
+    "position_vs_emas": "above" | "between" | "below",
+    "direction_vs_prior": "up" | "down" | "flat"
+  },
   "direction": "long" | "short" | "none",
   "setup_type": "pullback" | "continuation" | "none",
   "angle_ok": bool,

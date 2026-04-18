@@ -14,6 +14,17 @@ Two valid setup types:
 
 Return **pure JSON only** (no prose, no markdown fences).
 
+### Step 0 — Identify the CURRENT candle FIRST
+
+Before grading anything, locate the **rightmost candle** on the chart — this is the current/forming bar. The OHLC values at the top of the chart refer to THIS candle, not any earlier one.
+
+Compute and remember:
+- `latest_candle.color` — green if Close > Open, red if Close < Open
+- `latest_candle.position_vs_emas` — "above" / "between" / "below" the EMA9–EMA15 band
+- `latest_candle.direction_vs_prior` — "up" / "down" / "flat" relative to the previous closed candle
+
+All downstream grading must be consistent with the actual rightmost candle, NOT with a more dramatic candle further to the left.
+
 ### Grade the entry
 
 1. **setup_type** *(string)* — `"pullback"` | `"continuation"` | `"none"`. Pick the one that best matches what the most recent 3–10 candles are showing.
@@ -49,6 +60,11 @@ Return **pure JSON only** (no prose, no markdown fences).
 
 ```json
 {
+  "latest_candle": {
+    "color": "green" | "red",
+    "position_vs_emas": "above" | "between" | "below",
+    "direction_vs_prior": "up" | "down" | "flat"
+  },
   "setup_type": "pullback" | "continuation" | "none",
   "angle_ok": bool,
   "zone_rejection": bool,
