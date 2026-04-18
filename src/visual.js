@@ -82,9 +82,19 @@ export async function askGeminiVision({
   const inputTokens = usage.promptTokenCount ?? 0;
   const outputTokens = usage.candidatesTokenCount ?? 0;
 
-  // Gemini 2.5 Flash: $0.30/M input, $2.50/M output (approx, as of 2026-04)
+  // Per-model pricing $/M tokens (input, output) — verified Apr 2026.
+  // Falls back to 2.5 Flash rates for unknown models.
+  const PRICING = {
+    "gemini-3.1-pro-preview": [2.0, 12.0],
+    "gemini-3-pro-preview": [2.0, 12.0],
+    "gemini-3-flash-preview": [0.5, 3.0],
+    "gemini-2.5-pro": [1.25, 10.0],
+    "gemini-2.5-flash": [0.3, 2.5],
+    "gemini-2.5-flash-lite": [0.1, 0.4],
+  };
+  const [inRate, outRate] = PRICING[model] || PRICING["gemini-2.5-flash"];
   const costUSD =
-    (inputTokens / 1_000_000) * 0.3 + (outputTokens / 1_000_000) * 2.5;
+    (inputTokens / 1_000_000) * inRate + (outputTokens / 1_000_000) * outRate;
 
   return { result: parsed, inputTokens, outputTokens, costUSD, model };
 }

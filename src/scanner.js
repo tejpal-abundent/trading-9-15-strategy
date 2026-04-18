@@ -116,7 +116,10 @@ async function evaluateHtfCell(client, item, tf, rubric) {
   const { result, costUSD, model } = await askGeminiVision({
     imagePath,
     prompt,
-    model: process.env.VISUAL_MODEL || "gemini-2.5-flash",
+    model:
+      process.env.HTF_MODEL ||
+      process.env.VISUAL_MODEL ||
+      "gemini-3.1-pro-preview",
   });
   recordCost(costUSD);
 
@@ -151,7 +154,10 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
   const { result, costUSD, model } = await askGeminiVision({
     imagePath,
     prompt,
-    model: process.env.VISUAL_MODEL || "gemini-2.5-flash",
+    model:
+      process.env.LTF_MODEL ||
+      process.env.VISUAL_MODEL ||
+      "gemini-3-flash-preview",
   });
   recordCost(costUSD);
 
