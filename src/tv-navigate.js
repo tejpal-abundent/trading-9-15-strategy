@@ -160,6 +160,18 @@ async function waitForTitle(client, substring, maxWaitMs = 6000, intervalMs = 25
 export async function setSymbol(client, tvSymbol) {
   await dismissPopups(client);
 
+  // Skip the symbol switch entirely if the chart is already on this symbol —
+  // calling setSymbol on the same symbol triggers TV to reload the data feed
+  // AND silently revert the timeframe to the user's last view, which then
+  // races with the next setResolution() call.
+  const { result: cur } = await client.Runtime.evaluate({
+    expression: `(function() { try { return ${CHART_API}.symbol(); } catch (e) { return null; } })()`,
+    returnByValue: true,
+  }).catch(() => ({ result: { value: null } }));
+  if (cur.value && cur.value.toUpperCase() === tvSymbol.toUpperCase()) {
+    return;
+  }
+
   const { result } = await client.Runtime.evaluate({
     expression: `
       (function() {
@@ -458,8 +470,11 @@ export async function setTimeframe(client, timeframe) {
     await waitForChartReady(client);
     const { ok, saw } = await waitForLegendTf(client, timeframe, 8000);
     if (ok) {
-      // Extra settle so candles fully paint before any subsequent screenshot
-      await sleep(1200);
+      // Toolbar updates as soon as the button is clicked — but TV's actual
+      // chart data load can lag by 1-2 seconds especially when changing TF
+      // right after a symbol switch. Sleep long enough for the bars to
+      // actually re-render before any subsequent screenshot.
+      await sleep(2500);
       return;
     }
     console.log(
