@@ -47,8 +47,12 @@ Set `setup_type` to one of `"pullback"` | `"continuation"` | `"none"`. If `"none
 8. **red_flags** *(array of strings)* — Any of:
    - `"choppy_structure"` — last several HTF candles overlap with no clear direction
    - `"tangled_emas"` — EMA9/EMA15 cross back and forth recently
-   - `"news_spike"` — abnormal candle ~3×+ average HTF range
    - `"exhaustion"` — multiple long upper wicks (longs) or lower wicks (shorts), failure to follow through
+   
+   **Do NOT add a "news_spike" or "abnormal candle" flag at this timeframe.**
+   Monthly and weekly candles aggregate many news events — a single large
+   bullish month is normal trend behavior, not an anomaly. Big HTF candles
+   in the trend direction are typically bullish/bearish *signal*, not noise.
 
 9. **score** *(integer 0–10)* — Quality of this HTF as the basis for a trend trade, factoring in BOTH structure AND momentum. 10 = textbook. 7 = acceptable. <6 = reject.
 
