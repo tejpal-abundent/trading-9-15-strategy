@@ -418,6 +418,38 @@ test("dailyTriggerType: momentum trigger for short (solid_bear, no sweep)", () =
   assert.equal(dailyTriggerType(cell, "short"), "momentum");
 });
 
+test("dailyTriggerType: sweep trigger for short (above_prior_high)", () => {
+  const cell = {
+    direction_conflict: false,
+    prep_signals_count: 3,
+    red_flags: [],
+    candle_verdict: {
+      in_bias: true,
+      winner_strength: 9,
+      pattern: "shooting_star",
+      liquidity_swept: "above_prior_high",
+    },
+  };
+  assert.equal(dailyTriggerType(cell, "short"), "sweep");
+});
+
+test("dailyTriggerType: returns 'none' for invalid weeklyBias", () => {
+  const cell = {
+    direction_conflict: false,
+    prep_signals_count: 3,
+    red_flags: [],
+    candle_verdict: {
+      in_bias: true,
+      winner_strength: 9,
+      pattern: "solid_bull",
+      liquidity_swept: "none",
+    },
+  };
+  assert.equal(dailyTriggerType(cell, null), "none");
+  assert.equal(dailyTriggerType(cell, undefined), "none");
+  assert.equal(dailyTriggerType(cell, "flat"), "none");
+});
+
 test("dailyTriggerType: returns 'none' when state !== ENTER", () => {
   const cell = {
     direction_conflict: false,

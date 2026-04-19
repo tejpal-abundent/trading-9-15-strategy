@@ -80,9 +80,10 @@ export function dailyCellState(cell) {
 }
 
 // Classifies the ENTER reason. Priority: sweep (highest conviction) > pattern
-// > momentum. Returns "none" when state !== "ENTER".
+// > momentum. Returns "none" when state !== "ENTER" or bias is invalid.
 export function dailyTriggerType(cell, weeklyBias) {
   if (!cell || dailyCellState(cell) !== "ENTER") return "none";
+  if (weeklyBias !== "long" && weeklyBias !== "short") return "none";
   const v = cell.candle_verdict;
   const isLong = weeklyBias === "long";
 
@@ -948,6 +949,14 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
     result.weekly,
     result.daily,
   );
+
+  // All 3 TFs ran cleanly but the daily has no active setup — mark it as a
+  // proper stop so the report card reads honestly ("STOP @ 1D: daily_no_trigger")
+  // instead of pretending it was a complete scan with no signal.
+  if (result.daily.state === "NONE") {
+    result.stopped_at = "1D";
+    result.stop_reason = "daily_no_trigger";
+  }
   return result;
 }
 
