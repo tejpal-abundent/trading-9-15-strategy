@@ -297,23 +297,36 @@ function renderCandidateCard(r, attachments) {
 function renderStoppedRow(r, index, attachments) {
   const theme = statusTheme(r);
 
-  // For stopped results — attach the TF image that caused the stop
+  // For stopped results — attach the TF image that caused the stop, and
+  // keep a reference so we can render it right under the row (justification).
   const stopTfKey = stoppedTfKey(r);
+  let stopImgTag = "";
   if (stopTfKey && r[stopTfKey]?.image) {
-    makeAttachment(r.symbol, r[stopTfKey].tf || r.stopped_at, r[stopTfKey].image, attachments);
+    const tfLabel = r[stopTfKey].tf || r.stopped_at || stopTfKey;
+    const { cid, exists, missingPath } = makeAttachment(
+      r.symbol,
+      tfLabel,
+      r[stopTfKey].image,
+      attachments,
+    );
+    if (exists) {
+      stopImgTag = `<img src="cid:${cid}" alt="${htmlEscape(r.symbol)} ${tfLabel}" style="max-width:480px;width:100%;height:auto;border:1px solid #e5e7eb;display:block;margin:4px 0;" />`;
+    } else {
+      stopImgTag = `<p style="color:#6b7280;font-size:11px;font-style:italic;margin:4px 0;">[screenshot unavailable: ${htmlEscape(missingPath || "")}]</p>`;
+    }
   }
 
   const monthDir = r.monthly?.direction || "—";
   const dailyState = r.daily?.state || "—";
 
-  // One-line rationale: prefer daily reasoning, then weekly, then monthly
+  // Rationale: prefer daily reasoning, then weekly, then monthly
   const rationale =
-    (r.daily?.reasoning || r.weekly?.reasoning || r.monthly?.reasoning || "").slice(0, 140);
+    (r.daily?.reasoning || r.weekly?.reasoning || r.monthly?.reasoning || "").slice(0, 200);
 
   const zebra = index % 2 === 0 ? "#ffffff" : "#f9fafb";
   const rowBg = theme.bg !== "#f9fafb" ? theme.bg : zebra;
 
-  return `
+  const mainRow = `
     <tr style="background:${rowBg};border-left:4px solid ${theme.border};">
       <td style="padding:8px 10px;font-size:13px;font-weight:600;color:#111827;font-family:${FONT};white-space:nowrap;">${htmlEscape(r.symbol)}</td>
       <td style="padding:8px 10px;font-size:12px;color:#374151;font-family:${FONT};white-space:nowrap;">${dirIcon(monthDir)}</td>
@@ -321,8 +334,19 @@ function renderStoppedRow(r, index, attachments) {
       <td style="padding:8px 10px;font-size:12px;font-family:${FONT};white-space:nowrap;">
         <span style="padding:2px 8px;border-radius:3px;background:${theme.bg};color:${theme.text};border:1px solid ${theme.border};font-size:11px;">${htmlEscape(theme.label)}</span>
       </td>
-      <td style="padding:8px 10px;font-size:11px;color:#6b7280;font-family:${FONT};">${htmlEscape(rationale)}${rationale.length >= 140 ? "…" : ""}</td>
+      <td style="padding:8px 10px;font-size:11px;color:#6b7280;font-family:${FONT};">${htmlEscape(rationale)}${rationale.length >= 200 ? "…" : ""}</td>
     </tr>`;
+
+  // Second row spans all 5 columns with the stop-TF screenshot as visual
+  // justification. Only rendered if an image exists.
+  const imageRow = stopImgTag
+    ? `
+    <tr style="background:${rowBg};border-left:4px solid ${theme.border};">
+      <td colspan="5" style="padding:4px 10px 12px 10px;">${stopImgTag}</td>
+    </tr>`
+    : "";
+
+  return mainRow + imageRow;
 }
 
 // ---------------------------------------------------------------------------

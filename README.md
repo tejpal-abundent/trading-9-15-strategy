@@ -269,6 +269,50 @@ Additional guardrails that apply regardless of strategy:
 
 ---
 
+## Daily email report
+
+Runs the V2 scan and emails a color-coded HTML report with screenshot justification.
+
+### What it does
+- Runs `runScanV2` across the full watchlist (Monthly direction → Weekly quality gate → Daily reactive trigger).
+- Saves screenshots under `screenshots/YYYY-MM-DD/{SYMBOL}/{TF}.png` so history is preserved across daily runs.
+- Builds an HTML email with:
+  - **Candidate cards** (state = ENTER or WATCH) — full 3-TF screenshots inline, confluence grade badge, daily reasoning.
+  - **Full report card table** — every symbol, color-coded by status (green = ENTER, yellow = WATCH, blue/orange/gray = various stop reasons, red = LLM errors).
+  - Total LLM cost, timestamps, pipeline version.
+
+### Setup
+
+1. Add SMTP config to `.env` (see `.env.example`). For Gmail, generate an app password at https://myaccount.google.com/apppasswords — your regular Google password will not work with 2FA enabled.
+
+2. Dry-run preview (no email sent):
+   ```bash
+   # Fresh scan + HTML written to /tmp
+   node scripts/daily-scan-email.js --dry-run
+
+   # Or replay a saved scan — much faster iteration while tweaking the report
+   node scripts/daily-scan-email.js --dry-run --from-json=scan-results/latest-scan-v2.json
+   ```
+
+3. Live send (one email, right now):
+   ```bash
+   node scripts/daily-scan-email.js
+   ```
+
+### Cron — 4 AM IST daily
+
+4 AM IST = 22:30 UTC the prior day. Add to your crontab (`crontab -e`):
+
+```
+30 22 * * * cd /ABSOLUTE/PATH/TO/claude-tradingview-mcp-trading && /usr/local/bin/node scripts/daily-scan-email.js >> logs/daily-scan.log 2>&1
+```
+
+Adjust the path to `node` — find yours with `which node`. Create the `logs/` directory first.
+
+**Prerequisite:** TradingView Desktop must be running with `--remote-debugging-port=9222` at that time. Use `launchd` on macOS or a `systemd` user service on Linux to keep it alive across reboots.
+
+---
+
 ## Resources
 
 - [First video — Connect Claude to TradingView](https://youtu.be/vIX6ztULs4U)
