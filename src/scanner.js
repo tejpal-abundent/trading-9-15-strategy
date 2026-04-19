@@ -485,11 +485,11 @@ function isMonthlyParseFailure(result) {
 
 // Monthly direction-filter cell. Uses monthly-direction.md prompt.
 // Cheap — small prompt, just asks direction + 9-15 zone + candle verdict.
-async function evaluateMonthlyCell(client, item, rubric) {
+async function evaluateMonthlyCell(client, item, rubric, dateDir = null) {
   const slug = slugify(item.label);
   await setTimeframe(client, "1M");
   await dismissPopups(client);
-  let imagePath = await captureSymbolTf(client, slug, "1M", item.tv_symbol);
+  let imagePath = await captureSymbolTf(client, slug, "1M", item.tv_symbol, dateDir);
 
   const prompt = fillRubric(rubric, { SYMBOL: item.label });
   const primaryModel =
@@ -511,7 +511,7 @@ async function evaluateMonthlyCell(client, item, rubric) {
     const isRetry = attempts > 1;
     let modelToUse = primaryModel;
     if (isRetry) {
-      imagePath = await captureSymbolTf(client, slug, "1M", item.tv_symbol);
+      imagePath = await captureSymbolTf(client, slug, "1M", item.tv_symbol, dateDir);
       modelToUse = fallbackModel;
       usedFallback = true;
     }
@@ -570,11 +570,11 @@ function isWeeklyParseFailure(result) {
 }
 
 // Weekly structural-gate cell. Receives monthly bias as context.
-async function evaluateWeeklyCell(client, item, monthlyCell, rubric) {
+async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = null) {
   const slug = slugify(item.label);
   await setTimeframe(client, "1W");
   await dismissPopups(client);
-  let imagePath = await captureSymbolTf(client, slug, "1W", item.tv_symbol);
+  let imagePath = await captureSymbolTf(client, slug, "1W", item.tv_symbol, dateDir);
 
   const monthlyBias = monthlyCell.direction || "none";
   const in9_15Note = monthlyCell.in_9_15_zone
@@ -605,7 +605,7 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric) {
     const isRetry = attempts > 1;
     let modelToUse = primaryModel;
     if (isRetry) {
-      imagePath = await captureSymbolTf(client, slug, "1W", item.tv_symbol);
+      imagePath = await captureSymbolTf(client, slug, "1W", item.tv_symbol, dateDir);
       modelToUse = fallbackModel;
       usedFallback = true;
     }
@@ -667,11 +667,11 @@ function isDailyParseFailure(result) {
 }
 
 // Daily reactive-trigger cell. Receives monthly + weekly context.
-async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric) {
+async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, dateDir = null) {
   const slug = slugify(item.label);
   await setTimeframe(client, "1D");
   await dismissPopups(client);
-  let imagePath = await captureSymbolTf(client, slug, "1D", item.tv_symbol);
+  let imagePath = await captureSymbolTf(client, slug, "1D", item.tv_symbol, dateDir);
 
   const prompt = fillRubric(rubric, {
     SYMBOL: item.label,
@@ -700,7 +700,7 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric) 
     const isRetry = attempts > 1;
     let modelToUse = primaryModel;
     if (isRetry) {
-      imagePath = await captureSymbolTf(client, slug, "1D", item.tv_symbol);
+      imagePath = await captureSymbolTf(client, slug, "1D", item.tv_symbol, dateDir);
       modelToUse = fallbackModel;
       usedFallback = true;
     }
@@ -814,8 +814,13 @@ function deriveConfluence(monthly, weekly, daily) {
 // V2 pipeline — monthly direction filter → weekly quality gate → daily
 // reactive trigger. Bias cascades downstream. Stops early with distinct
 // stop_reason on any failure.
+//
+// opts.dateDir — optional "YYYY-MM-DD" string. When set, screenshots are
+// written under `screenshots/{dateDir}/{symbol}/{tf}.png` instead of
+// overwriting the legacy path. Used by the daily cron to preserve history.
 export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
   const verbose = opts.verbose !== false;
+  const dateDir = opts.dateDir ?? null;
   const log = (msg) => {
     if (verbose) console.log(msg);
   };
@@ -839,7 +844,7 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
 
   // ─── Step 1: Monthly ───────────────────────────────────────────────────
   log("    Monthly ...");
-  result.monthly = await evaluateMonthlyCell(client, item, rubrics.monthlyRubric);
+  result.monthly = await evaluateMonthlyCell(client, item, rubrics.monthlyRubric, dateDir);
   result.cost_usd += result.monthly.cost_usd;
 
   if (result.monthly.parse_failed) {
@@ -866,6 +871,7 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
     item,
     result.monthly,
     rubrics.weeklyRubric,
+    dateDir,
   );
   result.cost_usd += result.weekly.cost_usd;
 
@@ -920,6 +926,7 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
     result.monthly,
     result.weekly,
     rubrics.dailyRubric,
+    dateDir,
   );
   result.cost_usd += result.daily.cost_usd;
 
@@ -1147,11 +1154,17 @@ export async function runScan(options = {}) {
 
 // V2 scan: monthly-weekly-daily with candle_verdict + bias cascade.
 // Routed via `--htf-only` in bot.js.
+//
+// Screenshots are written under `screenshots/{YYYY-MM-DD}/...` by default so
+// daily cron runs don't overwrite each other. Pass `options.dateDir = null`
+// to restore the legacy flat-folder layout.
 export async function runScanV2(options = {}) {
   const watchlist = loadWatchlist(options.watchlistPath || "watchlist.json");
   const rubrics = loadV2Rubrics(options);
 
   const startedAt = new Date().toISOString();
+  const dateDir =
+    options.dateDir === null ? null : (options.dateDir ?? startedAt.slice(0, 10));
   console.log(
     `\n═══════════════════════════════════════════════════════════\n` +
       `  Scan started: ${startedAt}   (pipeline: v2 mtf-candle-verdict)\n` +
@@ -1169,7 +1182,10 @@ export async function runScanV2(options = {}) {
         `\n[${i + 1}/${watchlist.length}] ▶ ${item.label} (${item.tv_symbol})`,
       );
       try {
-        const r = await evaluateSymbolV2(client, item, rubrics, { verbose: true });
+        const r = await evaluateSymbolV2(client, item, rubrics, {
+          verbose: true,
+          dateDir,
+        });
         results.push(r);
       } catch (err) {
         console.log(`    ❌ ${err.message}`);

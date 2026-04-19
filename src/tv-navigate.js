@@ -339,14 +339,26 @@ export async function setTimeframe(client, timeframe) {
   );
 }
 
-// Capture the current chart state into a PNG file under
-// `screenshots/{slug}/{tf}.png`. Slug is filesystem-safe label.
+// Capture the current chart state into a PNG file.
+// When `dateDir` is null (legacy callers): `screenshots/{slug}/{tf}.png`.
+// When `dateDir` is "YYYY-MM-DD" (daily runs): `screenshots/{dateDir}/{slug}/{tf}.png`.
+// The date-partitioned layout preserves history across daily cron runs so the
+// email report always has the exact chart image Gemini saw that day.
+//
 // Re-confirms the legend reflects the requested timeframe before capturing
 // so we never save a stale chart from the previous TF. Optionally verifies
 // the symbol matches `expectedSymbol` and re-asserts it if it has drifted
 // (e.g., user clicked a different watchlist item mid-scan).
-export async function captureSymbolTf(client, slug, timeframe, expectedSymbol = null) {
-  const dir = resolve("screenshots", slug);
+export async function captureSymbolTf(
+  client,
+  slug,
+  timeframe,
+  expectedSymbol = null,
+  dateDir = null,
+) {
+  const dir = dateDir
+    ? resolve("screenshots", dateDir, slug)
+    : resolve("screenshots", slug);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const path = resolve(dir, `${timeframe}.png`);
 
