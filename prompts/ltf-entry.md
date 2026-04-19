@@ -2,6 +2,15 @@ You are reviewing a {SYMBOL} {TIMEFRAME} chart to confirm an **entry** in the al
 
 **HTF bias is {HTF_BIAS}.** Look ONLY for entry confirmation in this direction. Do NOT re-grade the trend or vote on direction — that decision is final.
 
+## Reactive trading principle
+
+This system trades **reactively, not predictively**. We do not bet on what the next candle will do. We grade what HAS happened on the most recent CLOSED candles.
+
+- The other signals (zone_rejection, coc_present, angle_ok, solid_continuation) tell us a setup is FORMING.
+- `strong_candle_in_bias` is the **trigger**: the most recent CLOSED candle must itself be a strong solid/engulfing in the bias direction. This is the proof that the setup has fired — not a prediction that it will.
+
+If `strong_candle_in_bias` is false, no trade today regardless of how clean everything else looks. Wait for the candle to close in the bias direction before reacting.
+
 The chart has two key indicators visible:
 - **EMA9** (orange line)
 - **EMA15** (purple line)
@@ -78,6 +87,10 @@ All downstream grading must be consistent with the actual rightmost candle, NOT 
 }
 ```
 
-Downstream computes:
-`signals = angle_ok + zone_rejection + coc_present + strong_candle_in_bias + solid_continuation`
-`pass = red_flags.length === 0 AND ((signals >= 2 AND score >= 8) OR probability_next_candle_in_bias >= 75)`
+Downstream state machine (reactive):
+- `prep_signals = angle_ok + zone_rejection + coc_present + solid_continuation`  (4 signals — strong_candle_in_bias is NOT counted here, it's the trigger)
+- `state = "ENTER"` if `prep_signals >= 2 AND red_flags empty AND strong_candle_in_bias = true`
+- `state = "WATCH"` if `prep_signals >= 2 AND red_flags empty AND strong_candle_in_bias = false`
+- `state = "NONE"` otherwise
+
+`probability_next_candle_in_bias` is used only to rank multiple ENTER triggers, never to pass a cell on its own.

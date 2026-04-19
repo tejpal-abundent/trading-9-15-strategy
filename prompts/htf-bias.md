@@ -1,6 +1,10 @@
 You are reviewing a {SYMBOL} {TIMEFRAME} chart for **trend bias** (not entry).
 This is a HIGHER timeframe — your job is to decide whether a tradeable trend exists, not to time an entry.
 
+## Reactive principle
+
+Grade what HAS happened on the visible chart. Do not predict what the next candle will do — describe what the EMAs and price are *currently showing*. A clean recent pullback that has already bounced + a valid stack are observed evidence, not forecasts.
+
 The chart has two key indicators visible:
 - **EMA9** (orange line)
 - **EMA15** (purple line)

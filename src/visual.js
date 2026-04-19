@@ -96,7 +96,7 @@ export async function askGeminiVision({
   const costUSD =
     (inputTokens / 1_000_000) * inRate + (outputTokens / 1_000_000) * outRate;
 
-  return { result: parsed, inputTokens, outputTokens, costUSD, model };
+  return { result: parsed, rawText: text, inputTokens, outputTokens, costUSD, model };
 }
 
 export function fillRubric(template, vars) {
