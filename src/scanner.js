@@ -768,6 +768,189 @@ function loadRubrics(opts = {}) {
   };
 }
 
+function loadV2Rubrics(opts = {}) {
+  return {
+    monthlyRubric: readFileSync(
+      opts.monthlyRubricPath || "prompts/monthly-direction.md",
+      "utf8",
+    ),
+    weeklyRubric: readFileSync(
+      opts.weeklyRubricPath || "prompts/weekly-structure.md",
+      "utf8",
+    ),
+    dailyRubric: readFileSync(
+      opts.dailyRubricPath || "prompts/daily-trigger.md",
+      "utf8",
+    ),
+  };
+}
+
+// Derives confluence grade by stacking verdicts across 3 TFs.
+//   A+  — all 3 bias-aligned, monthly in 9-15 zone, weekly score >= 8,
+//         daily state = ENTER with sweep/pattern trigger
+//   A   — all 3 bias-aligned, weekly score >= 8, daily state = ENTER
+//   B   — all 3 bias-aligned, daily state = ENTER
+//   C   — monthly + weekly aligned, daily state = WATCH
+//   —   — anything else
+function deriveConfluence(monthly, weekly, daily) {
+  if (!monthly || !weekly || !daily) return "—";
+  if (monthly.direction === "none" || weekly.direction === "none") return "—";
+  if (weekly.direction !== monthly.direction) return "—";
+  if (daily.direction_conflict) return "—";
+
+  if (daily.state === "ENTER") {
+    const sweepOrPattern =
+      daily.trigger_type === "sweep" || daily.trigger_type === "pattern";
+    if (monthly.in_9_15_zone && (weekly.score ?? 0) >= 8 && sweepOrPattern)
+      return "A+";
+    if ((weekly.score ?? 0) >= 8) return "A";
+    return "B";
+  }
+  if (daily.state === "WATCH") return "C";
+  return "—";
+}
+
+// V2 pipeline — monthly direction filter → weekly quality gate → daily
+// reactive trigger. Bias cascades downstream. Stops early with distinct
+// stop_reason on any failure.
+export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
+  const verbose = opts.verbose !== false;
+  const log = (msg) => {
+    if (verbose) console.log(msg);
+  };
+
+  const result = {
+    symbol: item.label,
+    tv_symbol: item.tv_symbol,
+    started_at: new Date().toISOString(),
+    stopped_at: null,
+    stop_reason: null,
+    monthly: null,
+    weekly: null,
+    daily: null,
+    confluence_grade: "—",
+    cost_usd: 0,
+    pipeline: "v2-mtf-candle-verdict",
+  };
+
+  await setSymbol(client, item.tv_symbol);
+  await dismissPopups(client);
+
+  // ─── Step 1: Monthly ───────────────────────────────────────────────────
+  log("    Monthly ...");
+  result.monthly = await evaluateMonthlyCell(client, item, rubrics.monthlyRubric);
+  result.cost_usd += result.monthly.cost_usd;
+
+  if (result.monthly.parse_failed) {
+    result.stopped_at = "1M";
+    result.stop_reason = "llm_parse_error";
+    log(`      ⚠️  parse_failed (tried ${result.monthly.attempts}x)`);
+    return result;
+  }
+  log(
+    `      dir=${result.monthly.direction} in_9_15=${result.monthly.in_9_15_zone}`,
+  );
+
+  if (result.monthly.direction === "none") {
+    result.stopped_at = "1M";
+    result.stop_reason = "monthly_no_trend";
+    log(`    🚫 STOP @ 1M: monthly_no_trend`);
+    return result;
+  }
+
+  // ─── Step 2: Weekly (conditioned on monthly bias) ──────────────────────
+  log("    Weekly ...");
+  result.weekly = await evaluateWeeklyCell(
+    client,
+    item,
+    result.monthly,
+    rubrics.weeklyRubric,
+  );
+  result.cost_usd += result.weekly.cost_usd;
+
+  if (result.weekly.parse_failed) {
+    result.stopped_at = "1W";
+    result.stop_reason = "llm_parse_error";
+    log(`      ⚠️  parse_failed (tried ${result.weekly.attempts}x)`);
+    return result;
+  }
+
+  if (result.weekly.direction_conflict) {
+    result.stopped_at = "1W";
+    result.stop_reason = "monthly_weekly_disagree";
+    log(
+      `    🚫 STOP @ 1W: monthly_weekly_disagree (weekly saw opposite of ${result.monthly.direction})`,
+    );
+    return result;
+  }
+
+  if (result.weekly.direction === "none") {
+    result.stopped_at = "1W";
+    result.stop_reason = "weekly_no_setup";
+    log(`    🚫 STOP @ 1W: weekly_no_setup (ambiguous structure)`);
+    return result;
+  }
+
+  if ((result.weekly.red_flags || []).length > 0) {
+    result.stopped_at = "1W";
+    result.stop_reason = "weekly_red_flag";
+    log(
+      `    🚫 STOP @ 1W: weekly_red_flag (${result.weekly.red_flags.join(", ")})`,
+    );
+    return result;
+  }
+
+  if ((result.weekly.score ?? 0) < 7) {
+    result.stopped_at = "1W";
+    result.stop_reason = "weekly_quality_low";
+    log(`    🚫 STOP @ 1W: weekly_quality_low (score ${result.weekly.score})`);
+    return result;
+  }
+
+  log(
+    `      dir=${result.weekly.direction} score=${result.weekly.score} setup=${result.weekly.setup_type}`,
+  );
+
+  // ─── Step 3: Daily (conditioned on monthly + weekly) ───────────────────
+  log("    Daily ...");
+  result.daily = await evaluateDailyCell(
+    client,
+    item,
+    result.monthly,
+    result.weekly,
+    rubrics.dailyRubric,
+  );
+  result.cost_usd += result.daily.cost_usd;
+
+  if (result.daily.parse_failed) {
+    result.stopped_at = "1D";
+    result.stop_reason = "llm_parse_error";
+    log(`      ⚠️  parse_failed (tried ${result.daily.attempts}x)`);
+    return result;
+  }
+
+  if (result.daily.direction_conflict) {
+    result.stopped_at = "1D";
+    result.stop_reason = "weekly_daily_disagree";
+    log(
+      `    🚫 STOP @ 1D: weekly_daily_disagree (daily broke against ${result.weekly.direction})`,
+    );
+    return result;
+  }
+
+  log(
+    `      state=${result.daily.state} prep=${result.daily.prep_signals_count}/4 ` +
+      `trigger=${result.daily.trigger_type}`,
+  );
+
+  result.confluence_grade = deriveConfluence(
+    result.monthly,
+    result.weekly,
+    result.daily,
+  );
+  return result;
+}
+
 function saveResult(prefix, label, payload) {
   if (!existsSync(RESULT_DIR)) mkdirSync(RESULT_DIR, { recursive: true });
   const stamp = (payload.started_at || new Date().toISOString()).replace(/[:.]/g, "-");
@@ -807,6 +990,19 @@ function summaryLine(r) {
     `(avg ${r.htf_avg_score.toFixed(1)})  →  numeric: ${numTxt}  ` +
     `→  WATCH: ${watch}   ENTER: ${enter}`
   );
+}
+
+function v2SummaryLine(r) {
+  if (r.stop_reason) {
+    return `  ${r.symbol.padEnd(12)} STOP @ ${r.stopped_at ?? "—"} (${r.stop_reason})`;
+  }
+  const bias = r.weekly?.direction ?? r.monthly?.direction ?? "?";
+  const dirTag =
+    bias === "long" ? "📈 LONG" : bias === "short" ? "📉 SHORT" : "— UNKNOWN";
+  const state = r.daily?.state ?? "?";
+  const trig = r.daily?.trigger_type ?? "—";
+  const zone = r.monthly?.in_9_15_zone ? "  [9-15 zone]" : "";
+  return `  ${r.symbol.padEnd(12)} ${dirTag}  ${state}  trigger=${trig}  grade=${r.confluence_grade}${zone}`;
 }
 
 export async function runDeepScan(symbolLabel, tvSymbol, options = {}) {
@@ -938,4 +1134,84 @@ export async function runScan(options = {}) {
   const path = saveResult("scan", "watchlist", summary);
   console.log(`\nFull results saved → ${path}`);
   return summary;
+}
+
+// V2 scan: monthly-weekly-daily with candle_verdict + bias cascade.
+// Routed via `--htf-only` in bot.js.
+export async function runScanV2(options = {}) {
+  const watchlist = loadWatchlist(options.watchlistPath || "watchlist.json");
+  const rubrics = loadV2Rubrics(options);
+
+  const startedAt = new Date().toISOString();
+  console.log(
+    `\n═══════════════════════════════════════════════════════════\n` +
+      `  Scan started: ${startedAt}   (pipeline: v2 mtf-candle-verdict)\n` +
+      `  Watchlist: ${watchlist.length} symbols\n` +
+      `  Flow per symbol: Monthly (direction) → Weekly (quality) → Daily (trigger)\n` +
+      `═══════════════════════════════════════════════════════════\n`,
+  );
+
+  const results = [];
+  let client;
+  try {
+    client = await openTvClient();
+    for (const [i, item] of watchlist.entries()) {
+      console.log(
+        `\n[${i + 1}/${watchlist.length}] ▶ ${item.label} (${item.tv_symbol})`,
+      );
+      try {
+        const r = await evaluateSymbolV2(client, item, rubrics, { verbose: true });
+        results.push(r);
+      } catch (err) {
+        console.log(`    ❌ ${err.message}`);
+        results.push({
+          symbol: item.label,
+          tv_symbol: item.tv_symbol,
+          stopped_at: null,
+          stop_reason: `error: ${err.message}`,
+          monthly: null,
+          weekly: null,
+          daily: null,
+          confluence_grade: "—",
+          cost_usd: 0,
+          pipeline: "v2-mtf-candle-verdict",
+        });
+      }
+    }
+  } finally {
+    await closeTvClient(client);
+  }
+
+  console.log("\n═══════════════════════════════════════════════════════════");
+  console.log("  Report Card");
+  console.log("═══════════════════════════════════════════════════════════");
+  for (const r of results) console.log(v2SummaryLine(r));
+
+  // Aggregate ENTER+WATCH candidates ranked by confluence grade
+  const gradeOrder = { "A+": 0, A: 1, B: 2, C: 3, "—": 4 };
+  const candidates = results
+    .filter((r) => r.confluence_grade !== "—")
+    .sort(
+      (a, b) => gradeOrder[a.confluence_grade] - gradeOrder[b.confluence_grade],
+    );
+
+  if (candidates.length === 0) {
+    console.log("\n  No candidates this scan.");
+  } else {
+    console.log("\n  Candidates (ranked by confluence grade):");
+    for (const r of candidates) console.log(`    ${v2SummaryLine(r).trim()}`);
+  }
+
+  const totalCost = results.reduce((sum, r) => sum + (r.cost_usd ?? 0), 0);
+  console.log(`\n  Total LLM cost: $${totalCost.toFixed(4)}`);
+
+  const payload = {
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    pipeline: "v2-mtf-candle-verdict",
+    results,
+  };
+  const path = saveResult("scan-v2", "watchlist", payload);
+  console.log(`\nFull results saved → ${path}`);
+  return payload;
 }

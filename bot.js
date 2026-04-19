@@ -1058,8 +1058,11 @@ if (isMainModule) {
       process.exit(1);
     });
   } else if (process.argv.includes("--scan")) {
+    const htfOnly = process.argv.includes("--htf-only");
     import("./src/scanner.js")
-      .then(({ runScan }) => runScan())
+      .then(({ runScan, runScanV2 }) =>
+        htfOnly ? runScanV2() : runScan({ htfOnly: false }),
+      )
       .catch((err) => {
         console.error("Scan error:", err);
         process.exit(1);
