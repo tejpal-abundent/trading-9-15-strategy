@@ -1,6 +1,17 @@
 [
   { "label": "BTCUSDT", "tv_symbol": "BINANCE:BTCUSDT", "binance_symbol": "BTCUSDT" },
   { "label": "ETHUSDT", "tv_symbol": "BINANCE:ETHUSDT", "binance_symbol": "ETHUSDT" },
+  { "label": "SOLUSDT", "tv_symbol": "BINANCE:SOLUSDT", "binance_symbol": "SOLUSDT" },
+  { "label": "XAUUSD",  "tv_symbol": "OANDA:XAUUSD",    "binance_symbol": null },
   { "label": "EURUSD",  "tv_symbol": "OANDA:EURUSD",    "binance_symbol": null },
-  { "label": "XAUUSD",  "tv_symbol": "OANDA:XAUUSD",    "binance_symbol": null }
+  { "label": "GBPUSD",  "tv_symbol": "OANDA:GBPUSD",    "binance_symbol": null },
+  { "label": "USDJPY",  "tv_symbol": "OANDA:USDJPY",    "binance_symbol": null },
+  { "label": "USDCHF",  "tv_symbol": "OANDA:USDCHF",    "binance_symbol": null },
+  { "label": "AUDUSD",  "tv_symbol": "OANDA:AUDUSD",    "binance_symbol": null },
+  { "label": "USDCAD",  "tv_symbol": "OANDA:USDCAD",    "binance_symbol": null },
+  { "label": "NZDUSD",  "tv_symbol": "OANDA:NZDUSD",    "binance_symbol": null },
+  { "label": "EURJPY",  "tv_symbol": "OANDA:EURJPY",    "binance_symbol": null },
+  { "label": "GBPJPY",  "tv_symbol": "OANDA:GBPJPY",    "binance_symbol": null },
+  { "label": "GBPAUD",  "tv_symbol": "OANDA:GBPAUD",    "binance_symbol": null },
+  { "label": "EURCHF",  "tv_symbol": "OANDA:EURCHF",    "binance_symbol": null }
 ]
