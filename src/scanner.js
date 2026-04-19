@@ -467,6 +467,298 @@ async function evaluateSymbol(client, item, htfRubric, ltfRubric, opts = {}) {
   return result;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  V2 pipeline — monthly direction filter → weekly quality gate → daily
+//  reactive trigger. Each cell gets richer context from the prior TF.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Monthly cell parse check — requires direction + candle_verdict.
+function isMonthlyParseFailure(result) {
+  return (
+    !result ||
+    typeof result.direction !== "string" ||
+    result.direction.length === 0 ||
+    !result.candle_verdict
+  );
+}
+
+// Monthly direction-filter cell. Uses monthly-direction.md prompt.
+// Cheap — small prompt, just asks direction + 9-15 zone + candle verdict.
+async function evaluateMonthlyCell(client, item, rubric) {
+  const slug = slugify(item.label);
+  await setTimeframe(client, "1M");
+  await dismissPopups(client);
+  let imagePath = await captureSymbolTf(client, slug, "1M", item.tv_symbol);
+
+  const prompt = fillRubric(rubric, { SYMBOL: item.label });
+  const primaryModel =
+    process.env.MONTHLY_MODEL ||
+    process.env.VISUAL_MODEL ||
+    "gemini-3.1-pro-preview";
+  const fallbackModel = pickFallbackModel(primaryModel);
+
+  const maxAttempts = 2;
+  let result, model;
+  let totalCost = 0;
+  let attempts = 0;
+  let parseFailed = false;
+  let usedFallback = false;
+  const rawTrace = [];
+
+  while (attempts < maxAttempts) {
+    attempts++;
+    const isRetry = attempts > 1;
+    let modelToUse = primaryModel;
+    if (isRetry) {
+      imagePath = await captureSymbolTf(client, slug, "1M", item.tv_symbol);
+      modelToUse = fallbackModel;
+      usedFallback = true;
+    }
+    const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
+    recordCost(resp.costUSD);
+    totalCost += resp.costUSD;
+    result = resp.result;
+    model = resp.model;
+    rawTrace.push({
+      attempt: attempts,
+      model: resp.model,
+      raw_text: (resp.rawText ?? "").slice(0, 2000),
+    });
+    if (!isMonthlyParseFailure(result)) {
+      parseFailed = false;
+      break;
+    }
+    parseFailed = true;
+  }
+
+  if (parseFailed) {
+    logParseFailure({
+      timestamp: new Date().toISOString(),
+      symbol: item.label,
+      tv_symbol: item.tv_symbol,
+      tf: "1M",
+      attempts,
+      image: imagePath,
+      attempts_detail: rawTrace,
+    });
+  }
+
+  return {
+    tf: "1M",
+    direction: result?.direction,
+    in_9_15_zone: !!result?.in_9_15_zone,
+    candle_verdict: result?.candle_verdict ?? null,
+    reasoning: result?.reasoning ?? "",
+    image: imagePath,
+    cost_usd: totalCost,
+    model,
+    parse_failed: parseFailed,
+    attempts,
+    used_fallback: usedFallback && !parseFailed,
+  };
+}
+
+// Weekly cell parse check.
+function isWeeklyParseFailure(result) {
+  return (
+    !result ||
+    typeof result.direction !== "string" ||
+    result.direction.length === 0 ||
+    !result.candle_verdict
+  );
+}
+
+// Weekly structural-gate cell. Receives monthly bias as context.
+async function evaluateWeeklyCell(client, item, monthlyCell, rubric) {
+  const slug = slugify(item.label);
+  await setTimeframe(client, "1W");
+  await dismissPopups(client);
+  let imagePath = await captureSymbolTf(client, slug, "1W", item.tv_symbol);
+
+  const monthlyBias = monthlyCell.direction || "none";
+  const in9_15Note = monthlyCell.in_9_15_zone
+    ? "Monthly price is currently in the 9-15 zone — this is an A+ setup context."
+    : "";
+  const prompt = fillRubric(rubric, {
+    SYMBOL: item.label,
+    MONTHLY_BIAS: monthlyBias,
+    MONTHLY_IN_9_15_ZONE_NOTE: in9_15Note,
+  });
+
+  const primaryModel =
+    process.env.WEEKLY_MODEL ||
+    process.env.VISUAL_MODEL ||
+    "gemini-3.1-pro-preview";
+  const fallbackModel = pickFallbackModel(primaryModel);
+
+  const maxAttempts = 2;
+  let result, model;
+  let totalCost = 0;
+  let attempts = 0;
+  let parseFailed = false;
+  let usedFallback = false;
+  const rawTrace = [];
+
+  while (attempts < maxAttempts) {
+    attempts++;
+    const isRetry = attempts > 1;
+    let modelToUse = primaryModel;
+    if (isRetry) {
+      imagePath = await captureSymbolTf(client, slug, "1W", item.tv_symbol);
+      modelToUse = fallbackModel;
+      usedFallback = true;
+    }
+    const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
+    recordCost(resp.costUSD);
+    totalCost += resp.costUSD;
+    result = resp.result;
+    model = resp.model;
+    rawTrace.push({
+      attempt: attempts,
+      model: resp.model,
+      raw_text: (resp.rawText ?? "").slice(0, 2000),
+    });
+    if (!isWeeklyParseFailure(result)) {
+      parseFailed = false;
+      break;
+    }
+    parseFailed = true;
+  }
+
+  if (parseFailed) {
+    logParseFailure({
+      timestamp: new Date().toISOString(),
+      symbol: item.label,
+      tv_symbol: item.tv_symbol,
+      tf: "1W",
+      attempts,
+      image: imagePath,
+      attempts_detail: rawTrace,
+    });
+  }
+
+  return {
+    tf: "1W",
+    direction: result?.direction,
+    direction_conflict: !!result?.direction_conflict,
+    setup_type: result?.setup_type ?? "none",
+    angle_ok: !!result?.angle_ok,
+    pullback_present: !!result?.pullback_present,
+    ema_stack_ok: !!result?.ema_stack_ok,
+    solid_continuation: !!result?.solid_continuation,
+    probability_next_candle_in_bias: result?.probability_next_candle_in_bias ?? 0,
+    red_flags: result?.red_flags ?? [],
+    score: result?.score ?? 0,
+    candle_verdict: result?.candle_verdict ?? null,
+    reasoning: result?.reasoning ?? "",
+    image: imagePath,
+    cost_usd: totalCost,
+    model,
+    parse_failed: parseFailed,
+    attempts,
+    used_fallback: usedFallback && !parseFailed,
+  };
+}
+
+// Daily cell parse check — requires candle_verdict + state field.
+function isDailyParseFailure(result) {
+  return !result || !result.candle_verdict || typeof result.state !== "string";
+}
+
+// Daily reactive-trigger cell. Receives monthly + weekly context.
+async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric) {
+  const slug = slugify(item.label);
+  await setTimeframe(client, "1D");
+  await dismissPopups(client);
+  let imagePath = await captureSymbolTf(client, slug, "1D", item.tv_symbol);
+
+  const prompt = fillRubric(rubric, {
+    SYMBOL: item.label,
+    MONTHLY_BIAS: monthlyCell.direction || "none",
+    WEEKLY_BIAS: weeklyCell.direction || "none",
+    WEEKLY_SCORE: String(weeklyCell.score ?? 0),
+    WEEKLY_PULLBACK_PRESENT: String(!!weeklyCell.pullback_present),
+  });
+
+  const primaryModel =
+    process.env.DAILY_MODEL ||
+    process.env.VISUAL_MODEL ||
+    "gemini-3.1-pro-preview";
+  const fallbackModel = pickFallbackModel(primaryModel);
+
+  const maxAttempts = 2;
+  let result, model;
+  let totalCost = 0;
+  let attempts = 0;
+  let parseFailed = false;
+  let usedFallback = false;
+  const rawTrace = [];
+
+  while (attempts < maxAttempts) {
+    attempts++;
+    const isRetry = attempts > 1;
+    let modelToUse = primaryModel;
+    if (isRetry) {
+      imagePath = await captureSymbolTf(client, slug, "1D", item.tv_symbol);
+      modelToUse = fallbackModel;
+      usedFallback = true;
+    }
+    const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
+    recordCost(resp.costUSD);
+    totalCost += resp.costUSD;
+    result = resp.result;
+    model = resp.model;
+    rawTrace.push({
+      attempt: attempts,
+      model: resp.model,
+      raw_text: (resp.rawText ?? "").slice(0, 2000),
+    });
+    if (!isDailyParseFailure(result)) {
+      parseFailed = false;
+      break;
+    }
+    parseFailed = true;
+  }
+
+  if (parseFailed) {
+    logParseFailure({
+      timestamp: new Date().toISOString(),
+      symbol: item.label,
+      tv_symbol: item.tv_symbol,
+      tf: "1D",
+      attempts,
+      image: imagePath,
+      attempts_detail: rawTrace,
+    });
+  }
+
+  const cell = {
+    tf: "1D",
+    direction_conflict: !!result?.direction_conflict,
+    setup_type: result?.setup_type ?? "none",
+    angle_ok: !!result?.angle_ok,
+    zone_rejection: !!result?.zone_rejection,
+    coc_present: !!result?.coc_present,
+    solid_continuation: !!result?.solid_continuation,
+    prep_signals_count: result?.prep_signals_count ?? 0,
+    probability_next_candle_in_bias: result?.probability_next_candle_in_bias ?? 0,
+    red_flags: result?.red_flags ?? [],
+    candle_verdict: result?.candle_verdict ?? null,
+    reasoning: result?.reasoning ?? "",
+    image: imagePath,
+    cost_usd: totalCost,
+    model,
+    parse_failed: parseFailed,
+    attempts,
+    used_fallback: usedFallback && !parseFailed,
+  };
+  // Authoritative state computation — the scanner's code is the source of
+  // truth for NONE/WATCH/ENTER, not the prompt's self-reported field.
+  cell.state = dailyCellState(cell);
+  cell.trigger_type = dailyTriggerType(cell, weeklyCell.direction);
+  return cell;
+}
+
 function loadRubrics(opts = {}) {
   const htfPath = opts.htfRubricPath || "prompts/htf-bias.md";
   const ltfPath = opts.ltfRubricPath || "prompts/ltf-entry.md";
