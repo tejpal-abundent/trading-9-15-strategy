@@ -23,12 +23,51 @@ Indicators visible:
 
 Return **pure JSON only** (no prose, no markdown fences).
 
+## Pass 1 — Measurements (extract these BEFORE forming any verdict)
+
+Look at the chart and report the following raw observations. No interpretation — just describe what is visibly there. You will use these in Pass 2 to justify every qualitative claim.
+
+```json
+"measurements": {
+  "prior_bar": {
+    "color": "green" | "red",
+    "body_pct_of_range": 0,
+    "high_relative_to_ema_band": "above" | "inside" | "below"
+  },
+  "current_closed_bar": {
+    "color": "green" | "red",
+    "body_pct_of_range": 0,
+    "upper_wick_pct": 0,
+    "lower_wick_pct": 0,
+    "close_position": "at_high" | "upper_third" | "mid" | "lower_third" | "at_low",
+    "high_vs_prior_bar_high": "above" | "equal" | "below",
+    "low_vs_prior_bar_low": "above" | "equal" | "below"
+  },
+  "forming_bar": {
+    "color": "green" | "red" | "doji",
+    "progress_pct": 0
+  },
+  "ema_state": {
+    "ema9_above_ema15": bool,
+    "ema9_ema15_distance": "tight" | "normal" | "wide",
+    "slope_direction": "up" | "down" | "flat",
+    "slope_steepness": "shallow" | "medium" | "steep"
+  },
+  "recent_5_bars": {
+    "direction": "up" | "down" | "mixed",
+    "overlap_pct": 0
+  }
+}
+```
+
+## Pass 2 — Gated verdicts (each must be supported by Pass 1)
+
 ### Step 1 — Direction
 
 Look at the EMA stack and slope over the last 10-20 monthly candles:
-- EMA9 above EMA15 AND both rising → `"long"`
-- EMA9 below EMA15 AND both falling → `"short"`
-- EMAs tangled, flat, or freshly crossed → `"none"`
+- `direction = "long"` ONLY IF `ema_state.ema9_above_ema15 = true` AND `ema_state.slope_direction = "up"` AND `ema_state.slope_steepness ≠ "shallow"`
+- `direction = "short"` symmetric
+- `direction = "none"` is reserved for genuinely tangled / freshly-flipped EMAs only — NOT for "EMAs are stacked but the forming bar looks ambiguous."
 
 If `direction === "none"`, still fill the candle_verdict but set `in_9_15_zone = false`.
 
@@ -60,6 +99,7 @@ Examine the rightmost CLOSED candle (not the forming one if still incomplete):
 
 ```json
 {
+  "measurements": { ... full Pass-1 schema above ... },
   "direction": "long" | "short" | "none",
   "in_9_15_zone": bool,
   "candle_verdict": {
