@@ -13,5 +13,6 @@
   { "label": "EURJPY",  "tv_symbol": "OANDA:EURJPY",    "binance_symbol": null },
   { "label": "GBPJPY",  "tv_symbol": "OANDA:GBPJPY",    "binance_symbol": null },
   { "label": "GBPAUD",  "tv_symbol": "OANDA:GBPAUD",    "binance_symbol": null },
-  { "label": "EURCHF",  "tv_symbol": "OANDA:EURCHF",    "binance_symbol": null }
+  { "label": "EURCHF",  "tv_symbol": "OANDA:EURCHF",    "binance_symbol": null },
+  { "label": "USOIL",   "tv_symbol": "TVC:USOIL",       "binance_symbol": null }
 ]
