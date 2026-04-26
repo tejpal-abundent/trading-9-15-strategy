@@ -26,7 +26,7 @@ Grade this weekly chart AS A {MONTHLY_BIAS} setup.
 
 - Look for a clean {MONTHLY_BIAS} pullback into the EMA9-EMA15 band with rejection back in the bias direction,
   OR a {MONTHLY_BIAS} continuation with solid follow-through candles.
-- If the chart clearly shows the OPPOSITE direction (EMAs stacked against monthly, momentum against it, no recoverable structure), DO NOT force-fit. Set `direction_conflict = true` and `direction = "none"`. Honest disagreement is more valuable than forced agreement.
+- If the chart clearly shows the OPPOSITE direction (EMAs stacked against monthly, momentum against it, no recoverable structure), DO NOT force-fit. Set `direction_conflict = true` and let `direction` reflect what the EMAs actually show (it may end up the opposite of monthly). Honest disagreement is more valuable than forced agreement.
 
 The chart has two indicators visible:
 - **EMA9** (orange line)
@@ -103,7 +103,7 @@ If `direction = "none"` or `direction_conflict = true`, fill the candle_verdict 
    - `"exhaustion"` ONLY IF (long bias: `current_closed_bar.upper_wick_pct ≥ 30` AND `current_closed_bar.high_vs_prior_bar_high = "above"` AND `current_closed_bar.color = "red"`) OR (short bias symmetric)
 7. **score** *(int 0-10)*:
    - `score ≥ 8` requires ALL of: `angle_ok = true`, `ema_stack_ok = true`, `pullback_present = true`, `current_closed_bar.color = matches bias`, `red_flags = []`
-   - `score = 7` allows ONE of those to be soft
+   - `score = 7` allows exactly ONE of {`angle_ok`, `ema_stack_ok`, `pullback_present`, `current_closed_bar.color` matches bias} to be false; `red_flags = []` is still required
    - `score < 6` = reject
 
 ### Step 4 — Candle Verdict (read the rightmost CLOSED weekly candle)
@@ -118,7 +118,36 @@ Use the same 11 fields as defined in the output schema below. Each numeric field
 
 ```json
 {
-  "measurements": { ... full Pass-1 schema above ... },
+  "measurements": {
+    "prior_bar": {
+      "color": "green" | "red",
+      "body_pct_of_range": 0,
+      "high_relative_to_ema_band": "above" | "inside" | "below"
+    },
+    "current_closed_bar": {
+      "color": "green" | "red",
+      "body_pct_of_range": 0,
+      "upper_wick_pct": 0,
+      "lower_wick_pct": 0,
+      "close_position": "at_high" | "upper_third" | "mid" | "lower_third" | "at_low",
+      "high_vs_prior_bar_high": "above" | "equal" | "below",
+      "low_vs_prior_bar_low": "above" | "equal" | "below"
+    },
+    "forming_bar": {
+      "color": "green" | "red" | "doji",
+      "progress_pct": 0
+    },
+    "ema_state": {
+      "ema9_above_ema15": bool,
+      "ema9_ema15_distance": "tight" | "normal" | "wide",
+      "slope_direction": "up" | "down" | "flat",
+      "slope_steepness": "shallow" | "medium" | "steep"
+    },
+    "recent_5_bars": {
+      "direction": "up" | "down" | "mixed",
+      "overlap_pct": 0
+    }
+  },
   "direction": "long" | "short" | "none",
   "direction_conflict": bool,
   "setup_type": "pullback" | "continuation" | "none",
