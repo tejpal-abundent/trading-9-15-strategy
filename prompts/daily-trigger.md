@@ -26,7 +26,7 @@ Grade what HAS happened on the most recent CLOSED candle. Never enter on predict
 
 You are ONLY looking for a **{WEEKLY_BIAS}** entry trigger on the daily chart.
 
-If the chart clearly shows the opposite direction (daily structure has broken against weekly bias, momentum clearly against, clear trend flip), return `direction_conflict = true` and `state = "NONE"`.
+If the chart clearly shows the opposite direction (daily structure has broken against weekly bias, momentum clearly against, clear trend flip), return `direction_conflict = true`. The scanner recomputes `state` from `direction_conflict`, so you do not need to set state explicitly — your honest self-report below is for diagnostics.
 
 The chart has two indicators visible:
 - **EMA9** (orange line)
@@ -92,15 +92,24 @@ Read the rightmost CLOSED candle. Each candle_verdict subfield is gated:
 - `winner = "buyers"` ONLY IF `current_closed_bar.color = "green"` AND `body_pct_of_range ≥ 40`
 - `winner = "sellers"` symmetric
 - `winner = "mixed"` for body < 40 OR doji-shape candles
-- `winner_strength` (0-10):
-  - 8-10: `body_pct_of_range ≥ 60` AND close at_high/at_low (matching winner)
-  - 5-7: `body_pct_of_range` 40-59 AND close upper_third/lower_third
-  - 0-4: small body OR mixed close
+- `winner_strength` (0-10) — derived from body and close position (matching the bar's winner):
+  - **8-10** if `body_pct_of_range ≥ 60` AND `close_position ∈ {"at_high", "at_low"}` (decisive close at extreme)
+  - **5-7** if `body_pct_of_range ≥ 40` AND `close_position ∈ {"upper_third", "lower_third", "at_high", "at_low"}` (and not already in 8-10)
+  - **0-4** otherwise (small body OR close in mid)
 - `liquidity_swept = "above_prior_high"` ONLY IF `current_closed_bar.high_vs_prior_bar_high = "above"` AND `close_position ∈ {"lower_third", "at_low"}` AND `color = "red"`
 - `liquidity_swept = "below_prior_low"` symmetric
 - `liquidity_swept = "none"` otherwise
 - `in_bias = true` ONLY IF `current_closed_bar.color matches {WEEKLY_BIAS}` AND `body_pct_of_range ≥ 40`
-- `pattern` — choose from the enum based on observed shape; `solid_bull` requires green AND body_pct ≥ 60 AND close_position upper_third or at_high; `solid_bear` symmetric; `hammer/pinbar_bull` require lower_wick_pct ≥ 50 AND green; `shooting_star/pinbar_bear` symmetric
+- `pattern` — choose from the enum based on observed shape:
+  - `solid_bull` ONLY IF green AND `body_pct_of_range ≥ 60` AND `close_position ∈ {"upper_third", "at_high"}`
+  - `solid_bear` ONLY IF red AND `body_pct_of_range ≥ 60` AND `close_position ∈ {"lower_third", "at_low"}`
+  - `hammer` / `pinbar_bull` ONLY IF green AND `lower_wick_pct ≥ 50` AND `body_pct_of_range ≤ 30`
+  - `shooting_star` / `pinbar_bear` ONLY IF red AND `upper_wick_pct ≥ 50` AND `body_pct_of_range ≤ 30`
+  - `engulfing_bull` ONLY IF green AND `prior_bar.color = "red"` AND `body_pct_of_range ≥ 60` AND `current_closed_bar.high_vs_prior_bar_high = "above"` AND `current_closed_bar.low_vs_prior_bar_low = "below"`
+  - `engulfing_bear` ONLY IF red AND `prior_bar.color = "green"` AND `body_pct_of_range ≥ 60` AND `current_closed_bar.high_vs_prior_bar_high = "above"` AND `current_closed_bar.low_vs_prior_bar_low = "below"`
+  - `inside_bar` ONLY IF `current_closed_bar.high_vs_prior_bar_high = "below"` AND `current_closed_bar.low_vs_prior_bar_low = "above"`
+  - `doji` ONLY IF `body_pct_of_range ≤ 10`
+  - `none` if no rule above matches
 
 ### Step 3 — Red flags
 
