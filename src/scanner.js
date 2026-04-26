@@ -571,6 +571,57 @@ export function sweepGateSatisfied(claim, measurements) {
   return true;
 }
 
+// Per-cell validator. Drops self-contradicting red_flags, resets unsupported
+// liquidity_swept claims to "none", and forces in_bias=false when the body is
+// too small to call. Mutates and returns the cell. Each rejection appends a
+// human-readable line to `cell.consistency_log` for later inspection.
+//
+// Cells with no `measurements` (legacy shape) or `parse_failed=true` pass
+// through unchanged — we only validate cells that have committed to numbers.
+export function validateCellConsistency(cell) {
+  if (!cell || cell.parse_failed) return cell;
+  if (!cell.measurements) return cell;
+
+  const log = [];
+
+  // 1. Drop self-contradicting red flags
+  if (Array.isArray(cell.red_flags) && cell.red_flags.length > 0) {
+    const direction = cell.direction;
+    const kept = [];
+    for (const flag of cell.red_flags) {
+      if (gateSatisfied(flag, cell.measurements, direction)) {
+        kept.push(flag);
+      } else {
+        log.push(`rejected red_flag '${flag}' — gate violated`);
+      }
+    }
+    cell.red_flags = kept;
+  }
+
+  // 2. Validate liquidity_swept on candle_verdict
+  const swept = cell.candle_verdict?.liquidity_swept;
+  if (swept && swept !== "none") {
+    if (!sweepGateSatisfied(swept, cell.measurements)) {
+      log.push(`rejected liquidity_swept '${swept}' — gate violated`);
+      cell.candle_verdict.liquidity_swept = "none";
+    }
+  }
+
+  // 3. in_bias requires body_pct_of_range >= 40
+  if (cell.candle_verdict?.in_bias === true) {
+    const body = cell.measurements.current_closed_bar?.body_pct_of_range;
+    if (typeof body === "number" && body < 40) {
+      log.push(`rejected in_bias=true — body_pct ${body} < 40`);
+      cell.candle_verdict.in_bias = false;
+    }
+  }
+
+  if (log.length > 0) {
+    cell.consistency_log = (cell.consistency_log || []).concat(log);
+  }
+  return cell;
+}
+
 // ─── Prior-run context formatters ──────────────────────────────────────
 //
 // formatPriorContext{Monthly,Weekly,Daily}() turn the structured object from

@@ -253,3 +253,152 @@ test("sweepGateSatisfied: missing measurements → true (older cell)", () => {
   assert.equal(sweepGateSatisfied("above_prior_high", null), true);
   assert.equal(sweepGateSatisfied("above_prior_high", { current_closed_bar: null }), true);
 });
+
+// ─── validateCellConsistency ─────────────────────────────────────────────
+
+import { validateCellConsistency } from "../src/scanner.js";
+
+test("validateCellConsistency: cell with no measurements → returns unchanged", () => {
+  const cell = {
+    direction: "long",
+    red_flags: ["exhaustion"],
+    candle_verdict: { liquidity_swept: "above_prior_high", in_bias: true },
+  };
+  const out = validateCellConsistency(cell);
+  assert.deepEqual(out.red_flags, ["exhaustion"]);
+  assert.equal(out.candle_verdict.liquidity_swept, "above_prior_high");
+});
+
+test("validateCellConsistency: parse_failed cell → returns unchanged", () => {
+  const cell = { parse_failed: true, red_flags: ["exhaustion"], measurements: null };
+  const out = validateCellConsistency(cell);
+  assert.deepEqual(out.red_flags, ["exhaustion"]);
+});
+
+test("validateCellConsistency: valid red_flag preserved", () => {
+  const cell = {
+    direction: "long",
+    red_flags: ["exhaustion"],
+    measurements: mkMeasurements(), // valid exhaustion: red bar, 30% upper wick, swept above
+    candle_verdict: { liquidity_swept: "none", in_bias: false },
+  };
+  const out = validateCellConsistency(cell);
+  assert.deepEqual(out.red_flags, ["exhaustion"]);
+  assert.equal(out.consistency_log, undefined);
+});
+
+test("validateCellConsistency: invalid red_flag dropped + logged", () => {
+  const cell = {
+    direction: "long",
+    red_flags: ["exhaustion"],
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "red",
+        body_pct_of_range: 30,
+        upper_wick_pct: 12, // tiny — fails the 30% gate
+        lower_wick_pct: 5,
+        close_position: "lower_third",
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "above",
+      },
+    }),
+    candle_verdict: { liquidity_swept: "none", in_bias: false },
+  };
+  const out = validateCellConsistency(cell);
+  assert.deepEqual(out.red_flags, []);
+  assert.equal(out.consistency_log.length, 1);
+  assert.match(out.consistency_log[0], /exhaustion/);
+});
+
+test("validateCellConsistency: mixed flags — invalid dropped, valid kept", () => {
+  const cell = {
+    direction: "long",
+    red_flags: ["exhaustion", "tangled_emas"],
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "red",
+        body_pct_of_range: 30,
+        upper_wick_pct: 10, // fails exhaustion
+        lower_wick_pct: 5,
+        close_position: "lower_third",
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "above",
+      },
+      ema_state: {
+        ema9_above_ema15: true,
+        ema9_ema15_distance: "tight", // satisfies tangled_emas
+        slope_direction: "up",
+        slope_steepness: "medium",
+      },
+    }),
+    candle_verdict: { liquidity_swept: "none", in_bias: false },
+  };
+  const out = validateCellConsistency(cell);
+  assert.deepEqual(out.red_flags, ["tangled_emas"]);
+});
+
+test("validateCellConsistency: invalid liquidity_swept reset to 'none' + logged", () => {
+  const cell = {
+    direction: "long",
+    red_flags: [],
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "green", // contradicts above_prior_high (which needs red)
+        body_pct_of_range: 60,
+        upper_wick_pct: 20,
+        lower_wick_pct: 10,
+        close_position: "lower_third",
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "above",
+      },
+    }),
+    candle_verdict: { liquidity_swept: "above_prior_high", in_bias: false },
+  };
+  const out = validateCellConsistency(cell);
+  assert.equal(out.candle_verdict.liquidity_swept, "none");
+  assert.equal(out.consistency_log.length, 1);
+  assert.match(out.consistency_log[0], /liquidity_swept/);
+});
+
+test("validateCellConsistency: in_bias=true with body 25% → forced to false", () => {
+  const cell = {
+    direction: "long",
+    red_flags: [],
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "green",
+        body_pct_of_range: 25, // < 40 → in_bias must be false
+        upper_wick_pct: 20,
+        lower_wick_pct: 55,
+        close_position: "upper_third",
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "above",
+      },
+    }),
+    candle_verdict: { liquidity_swept: "none", in_bias: true, body_pct_of_range: 25 },
+  };
+  const out = validateCellConsistency(cell);
+  assert.equal(out.candle_verdict.in_bias, false);
+  assert.match(out.consistency_log[0], /in_bias/);
+});
+
+test("validateCellConsistency: in_bias=true with body 65% → preserved", () => {
+  const cell = {
+    direction: "long",
+    red_flags: [],
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "green",
+        body_pct_of_range: 65,
+        upper_wick_pct: 10,
+        lower_wick_pct: 25,
+        close_position: "upper_third",
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "above",
+      },
+    }),
+    candle_verdict: { liquidity_swept: "none", in_bias: true, body_pct_of_range: 65 },
+  };
+  const out = validateCellConsistency(cell);
+  assert.equal(out.candle_verdict.in_bias, true);
+});
