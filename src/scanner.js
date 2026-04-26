@@ -498,6 +498,52 @@ async function evaluateSymbol(client, item, htfRubric, ltfRubric, opts = {}) {
 //  reactive trigger. Each cell gets richer context from the prior TF.
 // ═══════════════════════════════════════════════════════════════════════
 
+// ─── Cell consistency gates ─────────────────────────────────────────────
+//
+// Internal-consistency check: given a red_flag and the cell's own reported
+// `measurements`, does the model's claim hold up against its own numbers?
+//
+// Returns true when the gate is satisfied (claim is internally consistent)
+// or when we don't have a rule for the flag (passthrough). Returns false
+// only when the model's own measurements directly contradict the flag.
+//
+// This is a soft-validation layer — no external data, no extra LLM calls.
+// It exists to catch the AUDUSD-style failure where the model fires
+// `exhaustion` despite a tiny upper wick.
+export function gateSatisfied(flag, measurements, direction) {
+  if (!measurements) return true; // older cells without Pass-1 measurements
+  const c = measurements.current_closed_bar;
+  if (!c) return true;
+
+  switch (flag) {
+    case "exhaustion": {
+      const isLong = direction === "long";
+      const isShort = direction === "short";
+      if (!isLong && !isShort) return true; // no bias = nothing to contradict
+      const wickOk = isLong
+        ? (c.upper_wick_pct ?? 0) >= 30
+        : (c.lower_wick_pct ?? 0) >= 30;
+      const sweepOk = isLong
+        ? c.high_vs_prior_bar_high === "above"
+        : c.low_vs_prior_bar_low === "below";
+      const colorOk = isLong ? c.color === "red" : c.color === "green";
+      return wickOk && sweepOk && colorOk;
+    }
+    case "choppy_structure": {
+      const r = measurements.recent_5_bars;
+      if (!r) return true;
+      return (r.overlap_pct ?? 0) >= 60 && r.direction === "mixed";
+    }
+    case "tangled_emas": {
+      const e = measurements.ema_state;
+      if (!e) return true;
+      return e.ema9_ema15_distance === "tight";
+    }
+    default:
+      return true; // unknown flag — preserve, don't silently drop
+  }
+}
+
 // ─── Prior-run context formatters ──────────────────────────────────────
 //
 // formatPriorContext{Monthly,Weekly,Daily}() turn the structured object from
