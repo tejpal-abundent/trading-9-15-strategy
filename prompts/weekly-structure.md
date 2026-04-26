@@ -34,42 +34,91 @@ The chart has two indicators visible:
 
 Return **pure JSON only**.
 
-### Step 0 — Identify the CURRENT candle FIRST
+## Pass 1 — Measurements (extract these BEFORE any verdict)
 
-Before grading anything, locate the **rightmost candle** on the chart — this is the current/forming bar. Use the OHLC values at the top of the chart which refer to THIS candle.
+Locate the rightmost candle on the chart — this is the current/forming bar. The "current closed bar" referenced below is the bar IMMEDIATELY TO ITS LEFT (the most recent CLOSED bar). Report the following raw observations. No interpretation — these numbers will gate every verdict you make in Pass 2.
+
+```json
+"measurements": {
+  "prior_bar": {
+    "color": "green" | "red",
+    "body_pct_of_range": 0,
+    "high_relative_to_ema_band": "above" | "inside" | "below"
+  },
+  "current_closed_bar": {
+    "color": "green" | "red",
+    "body_pct_of_range": 0,
+    "upper_wick_pct": 0,
+    "lower_wick_pct": 0,
+    "close_position": "at_high" | "upper_third" | "mid" | "lower_third" | "at_low",
+    "high_vs_prior_bar_high": "above" | "equal" | "below",
+    "low_vs_prior_bar_low": "above" | "equal" | "below"
+  },
+  "forming_bar": {
+    "color": "green" | "red" | "doji",
+    "progress_pct": 0
+  },
+  "ema_state": {
+    "ema9_above_ema15": bool,
+    "ema9_ema15_distance": "tight" | "normal" | "wide",
+    "slope_direction": "up" | "down" | "flat",
+    "slope_steepness": "shallow" | "medium" | "steep"
+  },
+  "recent_5_bars": {
+    "direction": "up" | "down" | "mixed",
+    "overlap_pct": 0
+  }
+}
+```
+
+## Pass 2 — Gated verdicts (each gate references Pass-1 fields)
 
 ### Step 1 — Confirm or refute direction
 
 Given the monthly bias ({MONTHLY_BIAS}), does the weekly chart support it?
 
-- Supports → set `direction = "{MONTHLY_BIAS}"`, `direction_conflict = false`
-- Chart shows clear opposite → set `direction = "none"`, `direction_conflict = true`, skip remaining grading
-- EMAs tangled / just flipped / ambiguous → set `direction = "none"`, `direction_conflict = false`, skip remaining grading
+- `direction = "long"` ONLY IF `ema_state.ema9_above_ema15 = true` AND `ema_state.slope_direction = "up"` AND `ema_state.slope_steepness ≠ "shallow"`
+- `direction = "short"` symmetric
+- `direction = "none"` is reserved for tangled / freshly-flipped EMAs only — NOT for "EMAs are stacked but I see a mixed bar."
+- `direction_conflict = true` ONLY IF the weekly chart shows clearly the OPPOSITE of monthly_bias (EMAs stacked against monthly, momentum against). Honest disagreement is more valuable than forced agreement.
 
-### Step 2 — Identify setup type
+If `direction = "none"` or `direction_conflict = true`, fill the candle_verdict but skip the structural grading.
+
+### Step 2 — Setup type
 
 - **"pullback"** — price recently retraced INTO the EMA9-EMA15 band and just rejected away from it in the bias direction
 - **"continuation"** — pullback already happened; now seeing solid follow-through candles
 - **"none"** — neither; choppy or flat
 
-### Step 3 — Structural grading
+### Step 3 — Structural grading (gates use Pass-1 fields)
 
-1. **angle_ok** *(bool)* — EMA9/EMA15 slope at the most recent pullback turning point ≥ 30-40°
-2. **pullback_present** *(bool)* — clean pullback into the 9-15 band visible in recent history
-3. **ema_stack_ok** *(bool)* — EMA9 cleanly above EMA15 for long, below for short
-4. **solid_continuation** *(bool)* — recent 3-5 candles show solid bodies (≥60%) closing in bias direction
-5. **probability_next_candle_in_bias** *(int 0-100)*
-6. **red_flags** *(array)* — "choppy_structure", "tangled_emas", "exhaustion"
-7. **score** *(int 0-10)* — 10 textbook, 7 acceptable, < 6 reject
+1. **angle_ok** *(bool)* — `ema_state.slope_steepness ∈ {"medium", "steep"}` AND `ema_state.slope_direction` matches bias
+2. **pullback_present** *(bool)* — visible pullback into the EMA band in the last 5 bars (use `prior_bar.high_relative_to_ema_band` and the visible chart history to support)
+3. **ema_stack_ok** *(bool)* — `ema_state.ema9_above_ema15` matches bias direction (true for long, false for short)
+4. **solid_continuation** *(bool)* — at least 3 of the last 5 closed bars have `body_pct_of_range ≥ 60` AND closed in bias direction
+5. **probability_next_candle_in_bias** *(int 0-100)* — your estimate; used only for ranking
+6. **red_flags** *(array)* — emit ONLY when the gate below is met:
+   - `"choppy_structure"` ONLY IF `recent_5_bars.overlap_pct ≥ 60` AND `recent_5_bars.direction = "mixed"`
+   - `"tangled_emas"` ONLY IF `ema_state.ema9_ema15_distance = "tight"`
+   - `"exhaustion"` ONLY IF (long bias: `current_closed_bar.upper_wick_pct ≥ 30` AND `current_closed_bar.high_vs_prior_bar_high = "above"` AND `current_closed_bar.color = "red"`) OR (short bias symmetric)
+7. **score** *(int 0-10)*:
+   - `score ≥ 8` requires ALL of: `angle_ok = true`, `ema_stack_ok = true`, `pullback_present = true`, `current_closed_bar.color = matches bias`, `red_flags = []`
+   - `score = 7` allows ONE of those to be soft
+   - `score < 6` = reject
 
-### Step 4 — Candle Verdict (MANDATORY)
+### Step 4 — Candle Verdict (read the rightmost CLOSED weekly candle)
 
-Read the rightmost CLOSED weekly candle. Use the same 11 fields as defined in the output schema below. The `in_bias` field checks against `direction` (or the monthly bias if direction resolved to "none" but conflict = false).
+Use the same 11 fields as defined in the output schema below. Each numeric field must be consistent with `measurements.current_closed_bar` — `body_pct_of_range`, `upper_wick_pct`, `lower_wick_pct`, `close_position`, and the swept fields are the same.
+
+- `liquidity_swept = "above_prior_high"` ONLY IF `current_closed_bar.high_vs_prior_bar_high = "above"` AND `close_position ∈ {"lower_third", "at_low"}` AND `color = "red"`
+- `liquidity_swept = "below_prior_low"` symmetric
+- `in_bias = true` ONLY IF `current_closed_bar.color matches direction` AND `body_pct_of_range ≥ 40`
 
 ### Output format
 
 ```json
 {
+  "measurements": { ... full Pass-1 schema above ... },
   "direction": "long" | "short" | "none",
   "direction_conflict": bool,
   "setup_type": "pullback" | "continuation" | "none",
