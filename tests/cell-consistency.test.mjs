@@ -164,3 +164,92 @@ test("gateSatisfied: exhaustion with direction=none → true (no bias to contrad
   const m = mkMeasurements();
   assert.equal(gateSatisfied("exhaustion", m, "none"), true);
 });
+
+// ─── sweepGateSatisfied ──────────────────────────────────────────────────
+
+import { sweepGateSatisfied } from "../src/scanner.js";
+
+test("sweepGateSatisfied: above_prior_high with valid (red bar, lower_third, swept above) → true", () => {
+  const m = mkMeasurements({
+    current_closed_bar: {
+      color: "red",
+      body_pct_of_range: 60,
+      upper_wick_pct: 20,
+      lower_wick_pct: 10,
+      close_position: "lower_third",
+      high_vs_prior_bar_high: "above",
+      low_vs_prior_bar_low: "above",
+    },
+  });
+  assert.equal(sweepGateSatisfied("above_prior_high", m), true);
+});
+
+test("sweepGateSatisfied: above_prior_high but high not above prior → false", () => {
+  const m = mkMeasurements({
+    current_closed_bar: {
+      color: "red",
+      body_pct_of_range: 60,
+      upper_wick_pct: 20,
+      lower_wick_pct: 10,
+      close_position: "lower_third",
+      high_vs_prior_bar_high: "below",
+      low_vs_prior_bar_low: "above",
+    },
+  });
+  assert.equal(sweepGateSatisfied("above_prior_high", m), false);
+});
+
+test("sweepGateSatisfied: above_prior_high but close in mid (not lower_third/at_low) → false", () => {
+  const m = mkMeasurements({
+    current_closed_bar: {
+      color: "red",
+      body_pct_of_range: 30,
+      upper_wick_pct: 30,
+      lower_wick_pct: 30,
+      close_position: "mid",
+      high_vs_prior_bar_high: "above",
+      low_vs_prior_bar_low: "above",
+    },
+  });
+  assert.equal(sweepGateSatisfied("above_prior_high", m), false);
+});
+
+test("sweepGateSatisfied: above_prior_high but green bar (no sell rejection) → false", () => {
+  const m = mkMeasurements({
+    current_closed_bar: {
+      color: "green",
+      body_pct_of_range: 60,
+      upper_wick_pct: 20,
+      lower_wick_pct: 10,
+      close_position: "lower_third",
+      high_vs_prior_bar_high: "above",
+      low_vs_prior_bar_low: "above",
+    },
+  });
+  assert.equal(sweepGateSatisfied("above_prior_high", m), false);
+});
+
+test("sweepGateSatisfied: below_prior_low symmetric (green bar, upper_third, swept below) → true", () => {
+  const m = mkMeasurements({
+    current_closed_bar: {
+      color: "green",
+      body_pct_of_range: 60,
+      upper_wick_pct: 10,
+      lower_wick_pct: 20,
+      close_position: "upper_third",
+      high_vs_prior_bar_high: "below",
+      low_vs_prior_bar_low: "below",
+    },
+  });
+  assert.equal(sweepGateSatisfied("below_prior_low", m), true);
+});
+
+test("sweepGateSatisfied: 'none' claim → true (vacuously)", () => {
+  const m = mkMeasurements();
+  assert.equal(sweepGateSatisfied("none", m), true);
+});
+
+test("sweepGateSatisfied: missing measurements → true (older cell)", () => {
+  assert.equal(sweepGateSatisfied("above_prior_high", null), true);
+  assert.equal(sweepGateSatisfied("above_prior_high", { current_closed_bar: null }), true);
+});

@@ -544,6 +544,33 @@ export function gateSatisfied(flag, measurements, direction) {
   }
 }
 
+// Validates a `liquidity_swept` claim from candle_verdict against the cell's
+// `measurements.current_closed_bar`. Returns false only if the model's claim
+// directly contradicts its own reported relationship to the prior bar.
+export function sweepGateSatisfied(claim, measurements) {
+  if (!claim || claim === "none") return true;
+  const c = measurements?.current_closed_bar;
+  if (!c) return true;
+
+  if (claim === "above_prior_high") {
+    const lowerCloses = ["lower_third", "at_low"];
+    return (
+      c.high_vs_prior_bar_high === "above" &&
+      lowerCloses.includes(c.close_position) &&
+      c.color === "red"
+    );
+  }
+  if (claim === "below_prior_low") {
+    const upperCloses = ["upper_third", "at_high"];
+    return (
+      c.low_vs_prior_bar_low === "below" &&
+      upperCloses.includes(c.close_position) &&
+      c.color === "green"
+    );
+  }
+  return true;
+}
+
 // ─── Prior-run context formatters ──────────────────────────────────────
 //
 // formatPriorContext{Monthly,Weekly,Daily}() turn the structured object from
