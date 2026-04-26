@@ -1,5 +1,18 @@
 You are reviewing a {SYMBOL} WEEKLY chart for **structural quality** within a higher-timeframe bias.
 
+## Capture context
+
+**Screenshot timestamp: {CAPTURED_AT}.** This chart was captured at that exact moment. The rightmost candle is whatever was forming / had just closed at that time. Grade the structure as it stood at this timestamp — do not extrapolate future bars.
+
+## Prior run context (last 2 runs)
+
+{PRIOR_CONTEXT}
+
+Use the prior context to:
+- **Confirm continuity** — if today's structural read aligns with the prior weekly call, the setup is maturing.
+- **Detect a fade** — if the prior call was high-score (≥8) but today's structure has weakened, the setup is losing strength; reflect that in your `score`.
+- **Watch for a flip** — if today's chart shows a direction opposite to the prior, set `direction_conflict = true` if it's clearly broken against the monthly bias.
+
 ## Reactive principle
 
 Grade what HAS happened on the visible chart. Do not predict what the next candle will do — describe what the EMAs and price are *currently showing*.

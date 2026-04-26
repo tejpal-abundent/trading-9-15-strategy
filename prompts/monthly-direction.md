@@ -4,6 +4,19 @@ Your only job: decide which direction the market is allowed to be traded, and gr
 
 This is NOT a setup scan. Do not grade pullback quality. Do not rate structural score.
 
+## Capture context
+
+**Screenshot timestamp: {CAPTURED_AT}.** This chart was captured at that exact moment. Treat the rightmost candle as the bar that was forming / had just closed at that time, and ground your monthly-direction call to this point in time. Do not speculate about what may have happened after the screenshot.
+
+## Prior run context (last 2 runs)
+
+{PRIOR_CONTEXT}
+
+Use the prior context to:
+- **Confirm continuity** — if today's chart agrees with the prior call, conviction is higher.
+- **Flag a flip** — if today contradicts a prior LONG/SHORT call, note it in `reasoning`. A monthly direction change is significant.
+- **Stay reactive** — your job is still to grade THIS chart. Prior data is context, not a constraint.
+
 Indicators visible:
 - **EMA9** (orange line)
 - **EMA15** (purple line)

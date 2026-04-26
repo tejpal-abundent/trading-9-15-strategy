@@ -1,5 +1,19 @@
 You are reviewing a {SYMBOL} DAILY chart for **entry trigger** within an established higher-timeframe bias.
 
+## Capture context
+
+**Screenshot timestamp: {CAPTURED_AT}.** This chart was captured at that exact moment. The rightmost candle is the bar that was forming / had just closed at that time, and the "most recent CLOSED candle" referenced below is the bar to its immediate left if the rightmost is still incomplete. Ground the trigger evaluation to THIS moment — do not infer what the next bar will do.
+
+## Prior run context (last 2 runs)
+
+{PRIOR_CONTEXT}
+
+Use the prior context to answer these questions explicitly in `reasoning`:
+- **If T-1 was WATCH:** does today's closed candle deliver the confirmation that was awaited? If yes → ENTER (with the matching trigger_type). If the trigger window has passed without confirmation → still WATCH or NONE.
+- **If T-1 was ENTER:** did the candle that closed AFTER it follow through (continuation in bias direction) or fade (close against bias / wick rejection / flip)? A faded prior trigger lowers conviction — be conservative on a fresh ENTER today.
+- **If T-1 and T-2 both said NONE:** chart has been quiet — only call ENTER on a clearly decisive trigger candle.
+- **If today contradicts prior bias:** set `direction_conflict = true` if the daily structure is clearly broken; otherwise downgrade to WATCH and explain in `reasoning`.
+
 ## Reactive trading principle
 
 Grade what HAS happened on the most recent CLOSED candle. Never enter on prediction — only when a confirmation candle has actually closed in the bias direction. This system trades reactively.

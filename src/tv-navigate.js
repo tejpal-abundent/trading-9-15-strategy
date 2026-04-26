@@ -340,10 +340,16 @@ export async function setTimeframe(client, timeframe) {
 }
 
 // Capture the current chart state into a PNG file.
-// When `dateDir` is null (legacy callers): `screenshots/{slug}/{tf}.png`.
-// When `dateDir` is "YYYY-MM-DD" (daily runs): `screenshots/{dateDir}/{slug}/{tf}.png`.
+// When `dateDir` is null (legacy callers): `screenshots/{slug}/{tf}_<stamp>.png`.
+// When `dateDir` is "YYYY-MM-DD" (daily runs): `screenshots/{dateDir}/{slug}/{tf}_<stamp>.png`.
 // The date-partitioned layout preserves history across daily cron runs so the
-// email report always has the exact chart image Gemini saw that day.
+// email report always has the exact chart image Gemini saw that day. Each file
+// also embeds its UTC capture time (`<tf>_YYYY-MM-DD_HH-MM-SSZ.png`) so the
+// retry that overwrites a stale frame keeps both attempts on disk.
+//
+// Returns `{ path, capturedAt }` — capturedAt is a Date instance set at the
+// moment the screenshot was actually taken, so callers can pass the timestamp
+// down to the LLM prompt and persist it on the resulting cell.
 //
 // Re-confirms the legend reflects the requested timeframe before capturing
 // so we never save a stale chart from the previous TF. Optionally verifies
@@ -360,7 +366,6 @@ export async function captureSymbolTf(
     ? resolve("screenshots", dateDir, slug)
     : resolve("screenshots", slug);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const path = resolve(dir, `${timeframe}.png`);
 
   await dismissPopups(client);
 
@@ -418,9 +423,22 @@ export async function captureSymbolTf(
 
   // Extra settle time so candles fully render before capture
   await sleep(1000);
+  const capturedAt = new Date();
+  const stamp = capturedAt
+    .toISOString()
+    .slice(0, 19)
+    .replace("T", "_")
+    .replace(/:/g, "-") + "Z";
+  const path = resolve(dir, `${timeframe}_${stamp}.png`);
   const { data } = await client.Page.captureScreenshot({ format: "png" });
   writeFileSync(path, Buffer.from(data, "base64"));
-  return path;
+  return { path, capturedAt };
+}
+
+// Format a Date as the human-readable timestamp injected into LLM prompts.
+// "2026-04-25 10:14:23 UTC" — unambiguous, sortable, no locale issues.
+export function formatCapturedAtForPrompt(date) {
+  return date.toISOString().slice(0, 19).replace("T", " ") + " UTC";
 }
 
 // Read the chart's currently displayed symbol + resolution from TV's widget,

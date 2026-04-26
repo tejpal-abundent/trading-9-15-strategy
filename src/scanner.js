@@ -9,11 +9,13 @@ import {
   setSymbol,
   setTimeframe,
   captureSymbolTf,
+  formatCapturedAtForPrompt,
   getChartState,
   dismissPopups,
 } from "./tv-navigate.js";
 import { askGeminiVision, getTodaysCost, recordCost, fillRubric } from "./visual.js";
 import { fetchCandles, emaAlignment, agree } from "./higher-tf.js";
+import { loadPriorRunsForWatchlist, derivePriorContext } from "./history.js";
 
 const HTF_TIMEFRAMES = ["1M", "1W", "1D"];
 const LTF_TIMEFRAMES = ["4H", "2H", "1H"];
@@ -229,9 +231,13 @@ async function evaluateHtfCell(client, item, tf, rubric) {
   const slug = slugify(item.label);
   await setTimeframe(client, tf);
   await dismissPopups(client);
-  let imagePath = await captureSymbolTf(client, slug, tf, item.tv_symbol);
+  let { path: imagePath, capturedAt } = await captureSymbolTf(
+    client,
+    slug,
+    tf,
+    item.tv_symbol,
+  );
 
-  const prompt = fillRubric(rubric, { SYMBOL: item.label, TIMEFRAME: tf });
   const primaryModel =
     process.env.HTF_MODEL ||
     process.env.VISUAL_MODEL ||
@@ -252,11 +258,22 @@ async function evaluateHtfCell(client, item, tf, rubric) {
     let modelToUse = primaryModel;
     if (isRetry) {
       // Fresh screenshot — in case the chart was mid-draw / a popup was overlaid
-      // / TV had focus issues on the first capture.
-      imagePath = await captureSymbolTf(client, slug, tf, item.tv_symbol);
+      // / TV had focus issues on the first capture. Reassign capturedAt so the
+      // prompt + persisted cell reflect the actual timestamp the LLM saw.
+      ({ path: imagePath, capturedAt } = await captureSymbolTf(
+        client,
+        slug,
+        tf,
+        item.tv_symbol,
+      ));
       modelToUse = fallbackModel;
       usedFallback = true;
     }
+    const prompt = fillRubric(rubric, {
+      SYMBOL: item.label,
+      TIMEFRAME: tf,
+      CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
+    });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
     totalCost += resp.costUSD;
@@ -301,6 +318,7 @@ async function evaluateHtfCell(client, item, tf, rubric) {
     red_flags: result?.red_flags ?? [],
     reasoning: result?.reasoning ?? "",
     image: imagePath,
+    captured_at: capturedAt.toISOString(),
     cost_usd: totalCost,
     model,
     parse_failed: parseFailed,
@@ -315,12 +333,18 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
   const slug = slugify(item.label);
   await setTimeframe(client, tf);
   await dismissPopups(client);
-  const imagePath = await captureSymbolTf(client, slug, tf, item.tv_symbol);
+  const { path: imagePath, capturedAt } = await captureSymbolTf(
+    client,
+    slug,
+    tf,
+    item.tv_symbol,
+  );
 
   const prompt = fillRubric(rubric, {
     SYMBOL: item.label,
     TIMEFRAME: tf,
     HTF_BIAS: htfBias,
+    CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
   });
   const { result, costUSD, model } = await askGeminiVision({
     imagePath,
@@ -347,6 +371,7 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
     red_flags: result.red_flags ?? [],
     reasoning: result.reasoning ?? "",
     image: imagePath,
+    captured_at: capturedAt.toISOString(),
     cost_usd: costUSD,
     model,
   };
@@ -473,6 +498,120 @@ async function evaluateSymbol(client, item, htfRubric, ltfRubric, opts = {}) {
 //  reactive trigger. Each cell gets richer context from the prior TF.
 // ═══════════════════════════════════════════════════════════════════════
 
+// ─── Prior-run context formatters ──────────────────────────────────────
+//
+// formatPriorContext{Monthly,Weekly,Daily}() turn the structured object from
+// `derivePriorContext()` into a single markdown block injected into the
+// corresponding prompt as `{PRIOR_CONTEXT}`. The block surfaces the last 2
+// runs side-by-side so the LLM can compare its own prior verdicts against
+// the chart it's about to grade — confirm continuity, flag a flip, or detect
+// a failed trigger.
+
+const COLD_MONTHLY = "_No prior monthly evaluation on file — this is a cold scan._";
+const COLD_WEEKLY = "_No prior weekly evaluation on file — this is a cold scan._";
+const COLD_DAILY = "_No prior daily evaluation on file — this is a cold scan._";
+
+function fmtCapturedAt(ts) {
+  if (!ts) return "unknown";
+  return ts.slice(0, 19).replace("T", " ") + " UTC";
+}
+
+function fmtCandleVerdict(v) {
+  if (!v) return "no candle verdict on file";
+  const parts = [];
+  if (v.pattern && v.pattern !== "none") parts.push(`pattern=${v.pattern}`);
+  if (v.winner) parts.push(`winner=${v.winner}`);
+  if (typeof v.winner_strength === "number") parts.push(`strength=${v.winner_strength}`);
+  if (v.liquidity_swept && v.liquidity_swept !== "none")
+    parts.push(`swept=${v.liquidity_swept}`);
+  const verdict = v.verdict ? ` — "${v.verdict}"` : "";
+  return parts.join(", ") + verdict;
+}
+
+// Monthly prior context block — only shows the monthly slice of each prior run.
+export function formatPriorContextMonthly(priorContext) {
+  const runs = priorContext?.runs ?? [];
+  if (runs.length === 0) return COLD_MONTHLY;
+  const lines = [];
+  for (let i = 0; i < runs.length; i++) {
+    const r = runs[i];
+    const label = i === 0 ? "T-1 (most recent prior run)" : `T-${i + 1}`;
+    const stamp = fmtCapturedAt(r.monthly?.captured_at || r.started_at);
+    if (!r.monthly) {
+      lines.push(
+        `**${label}** — ${stamp}: monthly cell unavailable (stop=${r.stop_reason ?? "?"}).`,
+      );
+      continue;
+    }
+    const m = r.monthly;
+    lines.push(
+      `**${label}** — ${stamp}\n` +
+        `  - direction: **${m.direction}**, in_9_15_zone: ${m.in_9_15_zone}\n` +
+        `  - candle: ${fmtCandleVerdict(m.candle_verdict)}`,
+    );
+  }
+  return lines.join("\n\n");
+}
+
+// Weekly prior context block — full slice (monthly + weekly) of each prior run
+// so the model can see whether the bias was already aligned across TFs.
+export function formatPriorContextWeekly(priorContext) {
+  const runs = priorContext?.runs ?? [];
+  if (runs.length === 0) return COLD_WEEKLY;
+  const lines = [];
+  for (let i = 0; i < runs.length; i++) {
+    const r = runs[i];
+    const label = i === 0 ? "T-1 (most recent prior run)" : `T-${i + 1}`;
+    const stamp = fmtCapturedAt(r.weekly?.captured_at || r.started_at);
+    const monthlyDir = r.monthly?.direction ?? "—";
+    if (!r.weekly) {
+      lines.push(
+        `**${label}** — ${stamp}: weekly cell unavailable (monthly=${monthlyDir}, stop=${r.stop_reason ?? "?"}).`,
+      );
+      continue;
+    }
+    const w = r.weekly;
+    lines.push(
+      `**${label}** — ${stamp}\n` +
+        `  - monthly→weekly: ${monthlyDir} → **${w.direction}** ` +
+        `(score ${w.score}/10, setup=${w.setup_type}` +
+        (w.direction_conflict ? `, direction_conflict` : "") + `)\n` +
+        `  - candle: ${fmtCandleVerdict(w.candle_verdict)}`,
+    );
+  }
+  return lines.join("\n\n");
+}
+
+// Daily prior context block — surfaces the full chain (monthly→weekly→daily)
+// for each prior run so the model can answer "did yesterday's trigger
+// confirm or fade today?"
+export function formatPriorContextDaily(priorContext) {
+  const runs = priorContext?.runs ?? [];
+  if (runs.length === 0) return COLD_DAILY;
+  const lines = [];
+  for (let i = 0; i < runs.length; i++) {
+    const r = runs[i];
+    const label = i === 0 ? "T-1 (most recent prior run)" : `T-${i + 1}`;
+    const stamp = fmtCapturedAt(r.daily?.captured_at || r.started_at);
+    const monthlyDir = r.monthly?.direction ?? "—";
+    const weeklyDir = r.weekly?.direction ?? "—";
+    if (!r.daily) {
+      lines.push(
+        `**${label}** — ${stamp}: daily cell unavailable (chain ${monthlyDir} → ${weeklyDir} → stopped: ${r.stop_reason ?? "?"}).`,
+      );
+      continue;
+    }
+    const d = r.daily;
+    lines.push(
+      `**${label}** — ${stamp}\n` +
+        `  - chain: ${monthlyDir} → ${weeklyDir} → **state=${d.state}** ` +
+        `(trigger=${d.trigger_type}, prep ${d.prep_signals_count}/4, grade=${r.confluence_grade})\n` +
+        `  - candle: ${fmtCandleVerdict(d.candle_verdict)}`,
+    );
+  }
+  return lines.join("\n\n");
+}
+
 // Monthly cell parse check — requires direction + candle_verdict.
 function isMonthlyParseFailure(result) {
   return (
@@ -485,13 +624,18 @@ function isMonthlyParseFailure(result) {
 
 // Monthly direction-filter cell. Uses monthly-direction.md prompt.
 // Cheap — small prompt, just asks direction + 9-15 zone + candle verdict.
-async function evaluateMonthlyCell(client, item, rubric, dateDir = null) {
+async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBlock = COLD_MONTHLY) {
   const slug = slugify(item.label);
   await setTimeframe(client, "1M");
   await dismissPopups(client);
-  let imagePath = await captureSymbolTf(client, slug, "1M", item.tv_symbol, dateDir);
+  let { path: imagePath, capturedAt } = await captureSymbolTf(
+    client,
+    slug,
+    "1M",
+    item.tv_symbol,
+    dateDir,
+  );
 
-  const prompt = fillRubric(rubric, { SYMBOL: item.label });
   const primaryModel =
     process.env.MONTHLY_MODEL ||
     process.env.VISUAL_MODEL ||
@@ -511,10 +655,21 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null) {
     const isRetry = attempts > 1;
     let modelToUse = primaryModel;
     if (isRetry) {
-      imagePath = await captureSymbolTf(client, slug, "1M", item.tv_symbol, dateDir);
+      ({ path: imagePath, capturedAt } = await captureSymbolTf(
+        client,
+        slug,
+        "1M",
+        item.tv_symbol,
+        dateDir,
+      ));
       modelToUse = fallbackModel;
       usedFallback = true;
     }
+    const prompt = fillRubric(rubric, {
+      SYMBOL: item.label,
+      CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
+      PRIOR_CONTEXT: priorBlock,
+    });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
     totalCost += resp.costUSD;
@@ -551,6 +706,7 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null) {
     candle_verdict: result?.candle_verdict ?? null,
     reasoning: result?.reasoning ?? "",
     image: imagePath,
+    captured_at: capturedAt.toISOString(),
     cost_usd: totalCost,
     model,
     parse_failed: parseFailed,
@@ -570,21 +726,22 @@ function isWeeklyParseFailure(result) {
 }
 
 // Weekly structural-gate cell. Receives monthly bias as context.
-async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = null) {
+async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = null, priorBlock = COLD_WEEKLY) {
   const slug = slugify(item.label);
   await setTimeframe(client, "1W");
   await dismissPopups(client);
-  let imagePath = await captureSymbolTf(client, slug, "1W", item.tv_symbol, dateDir);
+  let { path: imagePath, capturedAt } = await captureSymbolTf(
+    client,
+    slug,
+    "1W",
+    item.tv_symbol,
+    dateDir,
+  );
 
   const monthlyBias = monthlyCell.direction || "none";
   const in9_15Note = monthlyCell.in_9_15_zone
     ? "Monthly price is currently in the 9-15 zone — this is an A+ setup context."
     : "";
-  const prompt = fillRubric(rubric, {
-    SYMBOL: item.label,
-    MONTHLY_BIAS: monthlyBias,
-    MONTHLY_IN_9_15_ZONE_NOTE: in9_15Note,
-  });
 
   const primaryModel =
     process.env.WEEKLY_MODEL ||
@@ -605,10 +762,23 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     const isRetry = attempts > 1;
     let modelToUse = primaryModel;
     if (isRetry) {
-      imagePath = await captureSymbolTf(client, slug, "1W", item.tv_symbol, dateDir);
+      ({ path: imagePath, capturedAt } = await captureSymbolTf(
+        client,
+        slug,
+        "1W",
+        item.tv_symbol,
+        dateDir,
+      ));
       modelToUse = fallbackModel;
       usedFallback = true;
     }
+    const prompt = fillRubric(rubric, {
+      SYMBOL: item.label,
+      MONTHLY_BIAS: monthlyBias,
+      MONTHLY_IN_9_15_ZONE_NOTE: in9_15Note,
+      CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
+      PRIOR_CONTEXT: priorBlock,
+    });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
     totalCost += resp.costUSD;
@@ -653,6 +823,7 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     candle_verdict: result?.candle_verdict ?? null,
     reasoning: result?.reasoning ?? "",
     image: imagePath,
+    captured_at: capturedAt.toISOString(),
     cost_usd: totalCost,
     model,
     parse_failed: parseFailed,
@@ -667,19 +838,17 @@ function isDailyParseFailure(result) {
 }
 
 // Daily reactive-trigger cell. Receives monthly + weekly context.
-async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, dateDir = null) {
+async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, dateDir = null, priorBlock = COLD_DAILY) {
   const slug = slugify(item.label);
   await setTimeframe(client, "1D");
   await dismissPopups(client);
-  let imagePath = await captureSymbolTf(client, slug, "1D", item.tv_symbol, dateDir);
-
-  const prompt = fillRubric(rubric, {
-    SYMBOL: item.label,
-    MONTHLY_BIAS: monthlyCell.direction || "none",
-    WEEKLY_BIAS: weeklyCell.direction || "none",
-    WEEKLY_SCORE: String(weeklyCell.score ?? 0),
-    WEEKLY_PULLBACK_PRESENT: String(!!weeklyCell.pullback_present),
-  });
+  let { path: imagePath, capturedAt } = await captureSymbolTf(
+    client,
+    slug,
+    "1D",
+    item.tv_symbol,
+    dateDir,
+  );
 
   const primaryModel =
     process.env.DAILY_MODEL ||
@@ -700,10 +869,25 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     const isRetry = attempts > 1;
     let modelToUse = primaryModel;
     if (isRetry) {
-      imagePath = await captureSymbolTf(client, slug, "1D", item.tv_symbol, dateDir);
+      ({ path: imagePath, capturedAt } = await captureSymbolTf(
+        client,
+        slug,
+        "1D",
+        item.tv_symbol,
+        dateDir,
+      ));
       modelToUse = fallbackModel;
       usedFallback = true;
     }
+    const prompt = fillRubric(rubric, {
+      SYMBOL: item.label,
+      MONTHLY_BIAS: monthlyCell.direction || "none",
+      WEEKLY_BIAS: weeklyCell.direction || "none",
+      WEEKLY_SCORE: String(weeklyCell.score ?? 0),
+      WEEKLY_PULLBACK_PRESENT: String(!!weeklyCell.pullback_present),
+      CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
+      PRIOR_CONTEXT: priorBlock,
+    });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
     totalCost += resp.costUSD;
@@ -747,6 +931,7 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     candle_verdict: result?.candle_verdict ?? null,
     reasoning: result?.reasoning ?? "",
     image: imagePath,
+    captured_at: capturedAt.toISOString(),
     cost_usd: totalCost,
     model,
     parse_failed: parseFailed,
@@ -825,6 +1010,13 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
     if (verbose) console.log(msg);
   };
 
+  // Derive per-TF prior-context markdown blocks from the optional priorRuns
+  // history slice for THIS symbol. Cold scan → cold sentinels.
+  const priorContext = derivePriorContext(opts.priorRuns ?? []);
+  const priorMonthlyBlock = formatPriorContextMonthly(priorContext);
+  const priorWeeklyBlock = formatPriorContextWeekly(priorContext);
+  const priorDailyBlock = formatPriorContextDaily(priorContext);
+
   const result = {
     symbol: item.label,
     tv_symbol: item.tv_symbol,
@@ -835,6 +1027,7 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
     weekly: null,
     daily: null,
     confluence_grade: "—",
+    prior_runs_count: priorContext.priorRunsCount,
     cost_usd: 0,
     pipeline: "v2-mtf-candle-verdict",
   };
@@ -844,7 +1037,13 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
 
   // ─── Step 1: Monthly ───────────────────────────────────────────────────
   log("    Monthly ...");
-  result.monthly = await evaluateMonthlyCell(client, item, rubrics.monthlyRubric, dateDir);
+  result.monthly = await evaluateMonthlyCell(
+    client,
+    item,
+    rubrics.monthlyRubric,
+    dateDir,
+    priorMonthlyBlock,
+  );
   result.cost_usd += result.monthly.cost_usd;
 
   if (result.monthly.parse_failed) {
@@ -872,6 +1071,7 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
     result.monthly,
     rubrics.weeklyRubric,
     dateDir,
+    priorWeeklyBlock,
   );
   result.cost_usd += result.weekly.cost_usd;
 
@@ -927,6 +1127,7 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
     result.weekly,
     rubrics.dailyRubric,
     dateDir,
+    priorDailyBlock,
   );
   result.cost_usd += result.daily.cost_usd;
 
@@ -1165,10 +1366,23 @@ export async function runScanV2(options = {}) {
   const startedAt = new Date().toISOString();
   const dateDir =
     options.dateDir === null ? null : (options.dateDir ?? startedAt.slice(0, 10));
+
+  // Load the last 2 prior runs per symbol so the LLM can see "what we said
+  // last time" and judge continuity vs flips. Cold-scan if no priors exist.
+  const priorBySymbol = options.priorBySymbol ?? loadPriorRunsForWatchlist({
+    beforeIso: startedAt,
+    maxPriorRuns: options.maxPriorRuns ?? 2,
+  });
+  const totalPriors = Array.from(priorBySymbol.values()).reduce(
+    (n, list) => n + list.length,
+    0,
+  );
+
   console.log(
     `\n═══════════════════════════════════════════════════════════\n` +
       `  Scan started: ${startedAt}   (pipeline: v2 mtf-candle-verdict)\n` +
       `  Watchlist: ${watchlist.length} symbols\n` +
+      `  Prior runs loaded: ${totalPriors} entries across ${priorBySymbol.size} symbols\n` +
       `  Flow per symbol: Monthly (direction) → Weekly (quality) → Daily (trigger)\n` +
       `═══════════════════════════════════════════════════════════\n`,
   );
@@ -1185,6 +1399,7 @@ export async function runScanV2(options = {}) {
         const r = await evaluateSymbolV2(client, item, rubrics, {
           verbose: true,
           dateDir,
+          priorRuns: priorBySymbol.get(item.label) ?? [],
         });
         results.push(r);
       } catch (err) {
