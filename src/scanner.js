@@ -823,11 +823,12 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBl
     });
   }
 
-  return {
+  const cell = {
     tf: "1M",
     direction: result?.direction,
     in_9_15_zone: !!result?.in_9_15_zone,
     candle_verdict: result?.candle_verdict ?? null,
+    measurements: result?.measurements ?? null,
     reasoning: result?.reasoning ?? "",
     image: imagePath,
     captured_at: capturedAt.toISOString(),
@@ -837,6 +838,7 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBl
     attempts,
     used_fallback: usedFallback && !parseFailed,
   };
+  return validateCellConsistency(cell);
 }
 
 // Weekly cell parse check.
@@ -932,7 +934,7 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     });
   }
 
-  return {
+  const cell = {
     tf: "1W",
     direction: result?.direction,
     direction_conflict: !!result?.direction_conflict,
@@ -945,6 +947,7 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     red_flags: result?.red_flags ?? [],
     score: result?.score ?? 0,
     candle_verdict: result?.candle_verdict ?? null,
+    measurements: result?.measurements ?? null,
     reasoning: result?.reasoning ?? "",
     image: imagePath,
     captured_at: capturedAt.toISOString(),
@@ -954,6 +957,7 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     attempts,
     used_fallback: usedFallback && !parseFailed,
   };
+  return validateCellConsistency(cell);
 }
 
 // Daily cell parse check — requires candle_verdict + state field.
@@ -1041,7 +1045,7 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     });
   }
 
-  const cell = {
+  let cell = {
     tf: "1D",
     direction_conflict: !!result?.direction_conflict,
     setup_type: result?.setup_type ?? "none",
@@ -1053,6 +1057,7 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     probability_next_candle_in_bias: result?.probability_next_candle_in_bias ?? 0,
     red_flags: result?.red_flags ?? [],
     candle_verdict: result?.candle_verdict ?? null,
+    measurements: result?.measurements ?? null,
     reasoning: result?.reasoning ?? "",
     image: imagePath,
     captured_at: capturedAt.toISOString(),
@@ -1062,6 +1067,9 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     attempts,
     used_fallback: usedFallback && !parseFailed,
   };
+  // Run consistency check BEFORE state derivation so dropped flags change
+  // the NONE/WATCH/ENTER outcome.
+  cell = validateCellConsistency(cell);
   // Authoritative state computation — the scanner's code is the source of
   // truth for NONE/WATCH/ENTER, not the prompt's self-reported field.
   cell.state = dailyCellState(cell);
