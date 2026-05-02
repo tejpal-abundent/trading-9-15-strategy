@@ -113,8 +113,8 @@ Read the rightmost CLOSED candle. Each candle_verdict subfield is gated:
 
 ### Step 3 — Red flags
 
-- `"choppy_structure"` ONLY IF `recent_5_bars.overlap_pct ≥ 60` AND `recent_5_bars.direction = "mixed"`
-- `"tangled_emas"` ONLY IF `ema_state.ema9_ema15_distance = "tight"`
+- `"choppy_structure"` ONLY IF `recent_5_bars.overlap_pct ≥ 75` AND `recent_5_bars.direction = "mixed"` AND `ema_state.slope_steepness ∈ {"flat", "shallow"}`
+- `"tangled_emas"` ONLY IF `ema_state.ema9_ema15_distance = "tight"` AND `ema_state.slope_steepness ∈ {"flat", "shallow"}`
 - `"exhaustion"` ONLY IF (long bias: `current_closed_bar.upper_wick_pct ≥ 30` AND `high_vs_prior_bar_high = "above"` AND `color = "red"`) OR (short bias symmetric)
 
 ### Step 4 — Probability (for ranking only)

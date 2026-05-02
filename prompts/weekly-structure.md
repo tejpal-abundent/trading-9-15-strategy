@@ -98,8 +98,8 @@ If `direction = "none"` or `direction_conflict = true`, fill the candle_verdict 
 4. **solid_continuation** *(bool)* — at least 3 of the last 5 closed bars have `body_pct_of_range ≥ 60` AND closed in bias direction
 5. **probability_next_candle_in_bias** *(int 0-100)* — your estimate; used only for ranking
 6. **red_flags** *(array)* — emit ONLY when the gate below is met:
-   - `"choppy_structure"` ONLY IF `recent_5_bars.overlap_pct ≥ 60` AND `recent_5_bars.direction = "mixed"`
-   - `"tangled_emas"` ONLY IF `ema_state.ema9_ema15_distance = "tight"`
+   - `"choppy_structure"` ONLY IF `recent_5_bars.overlap_pct ≥ 75` AND `recent_5_bars.direction = "mixed"` AND `ema_state.slope_steepness ∈ {"flat", "shallow"}`
+   - `"tangled_emas"` ONLY IF `ema_state.ema9_ema15_distance = "tight"` AND `ema_state.slope_steepness ∈ {"flat", "shallow"}`
    - `"exhaustion"` ONLY IF (long bias: `current_closed_bar.upper_wick_pct ≥ 30` AND `current_closed_bar.high_vs_prior_bar_high = "above"` AND `current_closed_bar.color = "red"`) OR (short bias symmetric)
 7. **score** *(int 0-10)*:
    - `score ≥ 8` requires ALL of: `angle_ok = true`, `ema_stack_ok = true`, `pullback_present = true`, `current_closed_bar.color = matches bias`, `red_flags = []`

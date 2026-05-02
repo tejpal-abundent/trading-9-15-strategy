@@ -101,9 +101,15 @@ test("gateSatisfied: exhaustion short with valid (lower wick 32, swept below pri
 
 // ─── choppy_structure ────────────────────────────────────────────────────
 
-test("gateSatisfied: choppy_structure with overlap=70 mixed → true", () => {
+test("gateSatisfied: choppy_structure with overlap=80 mixed slope=flat → true", () => {
   const m = mkMeasurements({
-    recent_5_bars: { direction: "mixed", overlap_pct: 70 },
+    recent_5_bars: { direction: "mixed", overlap_pct: 80 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "flat",
+      slope_steepness: "flat",
+    },
   });
   assert.equal(gateSatisfied("choppy_structure", m, "long"), true);
 });
@@ -124,13 +130,13 @@ test("gateSatisfied: choppy_structure with high overlap but direction=up → fal
 
 // ─── tangled_emas ────────────────────────────────────────────────────────
 
-test("gateSatisfied: tangled_emas with tight distance → true", () => {
+test("gateSatisfied: tangled_emas with tight distance slope=flat → true", () => {
   const m = mkMeasurements({
     ema_state: {
       ema9_above_ema15: true,
       ema9_ema15_distance: "tight",
-      slope_direction: "up",
-      slope_steepness: "medium",
+      slope_direction: "flat",
+      slope_steepness: "flat",
     },
   });
   assert.equal(gateSatisfied("tangled_emas", m, "long"), true);
@@ -327,8 +333,8 @@ test("validateCellConsistency: mixed flags — invalid dropped, valid kept", () 
       ema_state: {
         ema9_above_ema15: true,
         ema9_ema15_distance: "tight", // satisfies tangled_emas
-        slope_direction: "up",
-        slope_steepness: "medium",
+        slope_direction: "flat",
+        slope_steepness: "flat",
       },
     }),
     candle_verdict: { liquidity_swept: "none", in_bias: false },
@@ -401,4 +407,96 @@ test("validateCellConsistency: in_bias=true with body 65% → preserved", () => 
   };
   const out = validateCellConsistency(cell);
   assert.equal(out.candle_verdict.in_bias, true);
+});
+
+// ─── P1: choppy_structure tightened gate ─────────────────────────────────
+
+test("gateSatisfied: choppy_structure overlap=80 mixed slope=flat → true (genuine chop)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "mixed", overlap_pct: 80 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "flat",
+      slope_steepness: "flat",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), true);
+});
+
+test("gateSatisfied: choppy_structure overlap=80 mixed slope=steep → false (pullback in trend)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "mixed", overlap_pct: 80 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "wide",
+      slope_direction: "up",
+      slope_steepness: "steep",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
+});
+
+test("gateSatisfied: choppy_structure overlap=70 mixed slope=flat → false (below new threshold)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "mixed", overlap_pct: 70 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "flat",
+      slope_steepness: "flat",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
+});
+
+test("gateSatisfied: choppy_structure overlap=80 direction=up slope=flat → false (not mixed)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "up", overlap_pct: 80 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "flat",
+      slope_steepness: "flat",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
+});
+
+// ─── P2: tangled_emas tightened gate ─────────────────────────────────────
+
+test("gateSatisfied: tangled_emas tight + slope=shallow → true (genuinely tangled)", () => {
+  const m = mkMeasurements({
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "tight",
+      slope_direction: "up",
+      slope_steepness: "shallow",
+    },
+  });
+  assert.equal(gateSatisfied("tangled_emas", m, "long"), true);
+});
+
+test("gateSatisfied: tangled_emas tight + slope=steep → false (consolidation before continuation)", () => {
+  const m = mkMeasurements({
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "tight",
+      slope_direction: "up",
+      slope_steepness: "steep",
+    },
+  });
+  assert.equal(gateSatisfied("tangled_emas", m, "long"), false);
+});
+
+test("gateSatisfied: tangled_emas distance=normal slope=flat → false (not tight)", () => {
+  const m = mkMeasurements({
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "flat",
+      slope_steepness: "flat",
+    },
+  });
+  assert.equal(gateSatisfied("tangled_emas", m, "long"), false);
 });

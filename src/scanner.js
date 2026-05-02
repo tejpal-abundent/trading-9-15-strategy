@@ -531,13 +531,21 @@ export function gateSatisfied(flag, measurements, direction) {
     }
     case "choppy_structure": {
       const r = measurements.recent_5_bars;
-      if (!r) return true;
-      return (r.overlap_pct ?? 0) >= 60 && r.direction === "mixed";
+      const e = measurements.ema_state;
+      if (!r || !e) return true;  // missing data → keep flag (legacy passthrough)
+      return (
+        (r.overlap_pct ?? 0) >= 75 &&
+        r.direction === "mixed" &&
+        (e.slope_steepness === "flat" || e.slope_steepness === "shallow")
+      );
     }
     case "tangled_emas": {
       const e = measurements.ema_state;
       if (!e) return true;
-      return e.ema9_ema15_distance === "tight";
+      return (
+        e.ema9_ema15_distance === "tight" &&
+        (e.slope_steepness === "flat" || e.slope_steepness === "shallow")
+      );
     }
     default:
       return true; // unknown flag — preserve, don't silently drop
