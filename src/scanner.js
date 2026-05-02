@@ -1110,7 +1110,7 @@ function loadV2Rubrics(opts = {}) {
 //   B   — all 3 bias-aligned, daily state = ENTER
 //   C   — monthly + weekly aligned, daily state = WATCH
 //   —   — anything else
-function deriveConfluence(monthly, weekly, daily) {
+export function deriveConfluence(monthly, weekly, daily) {
   if (!monthly || !weekly || !daily) return "—";
   if (monthly.direction === "none" || weekly.direction === "none") return "—";
   if (weekly.direction !== monthly.direction) return "—";

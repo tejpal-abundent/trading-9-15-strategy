@@ -1,0 +1,87 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadScanCells } from "../tools/golden-loader.mjs";
+
+test("loadScanCells: returns Map<symbol, {monthly, weekly, daily}> for latest scan", async () => {
+  const cells = await loadScanCells("scan-results/latest-scan-v2.json");
+  assert.ok(cells instanceof Map, "expected a Map");
+  assert.ok(cells.size >= 5, `expected ≥ 5 symbols, got ${cells.size}`);
+  const audusd = cells.get("AUDUSD");
+  assert.ok(audusd, "AUDUSD missing from latest scan");
+  assert.ok(audusd.weekly, "weekly cell missing for AUDUSD");
+  assert.ok(audusd.weekly.measurements, "AUDUSD weekly.measurements missing");
+});
+
+import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { loadGolden } from "../tools/golden-loader.mjs";
+
+test("loadGolden: parses CSV into row objects (skips comments + blank lines)", () => {
+  mkdirSync("/tmp/gl-test", { recursive: true });
+  const path = "/tmp/gl-test/test.csv";
+  writeFileSync(
+    path,
+    "symbol,scenario,note\n# this is a comment\nAUDUSD,test-scenario,\"a, b, c\"\n\nGBPJPY,other,",
+  );
+  const rows = loadGolden(path);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].symbol, "AUDUSD");
+  assert.equal(rows[0].note, "a, b, c");
+  assert.equal(rows[1].symbol, "GBPJPY");
+  rmSync("/tmp/gl-test", { recursive: true, force: true });
+});
+
+import { replayResult } from "../tools/replay-engine.mjs";
+
+test("replayResult: stops at monthly_no_trend when monthly.direction is none", () => {
+  const cells = {
+    monthly: { direction: "none", in_9_15_zone: false, parse_failed: false },
+    weekly: null,
+    daily: null,
+  };
+  const result = replayResult(cells);
+  assert.equal(result.stopped_at, "1M");
+  assert.equal(result.stop_reason, "monthly_no_trend");
+  assert.equal(result.confluence_grade, "—");
+});
+
+test("replayResult: full pipeline runs when monthly + weekly + daily all valid", () => {
+  // Full pipeline test — synthetic cells crafted to clear every gate under
+  // the CURRENT (pre-T4) gate code.
+  const cells = {
+    monthly: {
+      direction: "long",
+      in_9_15_zone: false,
+      parse_failed: false,
+      measurements: { ema_state: { slope_steepness: "medium", ema9_ema15_distance: "normal" } },
+    },
+    weekly: {
+      direction: "long",
+      direction_conflict: false,
+      score: 8,
+      red_flags: [],
+      parse_failed: false,
+      candle_verdict: { in_bias: true, winner_strength: 8, pattern: "solid_bull", liquidity_swept: "none" },
+      measurements: {
+        current_closed_bar: { color: "green", body_pct_of_range: 80, close_position: "upper_third" },
+        ema_state: { slope_steepness: "steep", ema9_ema15_distance: "wide" },
+        recent_5_bars: { direction: "up", overlap_pct: 30 },
+      },
+    },
+    daily: {
+      direction_conflict: false,
+      red_flags: [],
+      prep_signals_count: 3,
+      angle_ok: true,
+      zone_rejection: true,
+      coc_present: false,
+      solid_continuation: true,
+      setup_type: "pullback",
+      parse_failed: false,
+      candle_verdict: { in_bias: true, winner_strength: 8, pattern: "solid_bull", liquidity_swept: "none" },
+      measurements: {},
+    },
+  };
+  const result = replayResult(cells);
+  assert.equal(result.stop_reason, null);
+  assert.equal(result.confluence_grade !== "—", true, `expected non-stop grade, got ${result.confluence_grade}`);
+});
