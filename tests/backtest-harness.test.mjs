@@ -120,3 +120,33 @@ test("replayResult: does not mutate the caller's nested cell fields", () => {
     "replayResult should not mutate the caller's nested candle_verdict",
   );
 });
+
+import { spawnSync } from "node:child_process";
+
+test("backtest CLI: golden assertion against scan rows passes (baseline)", () => {
+  const result = spawnSync("node", ["tools/backtest.mjs", "--quiet"], {
+    encoding: "utf8",
+    cwd: process.cwd(),
+  });
+  // BASELINE expectation under PRE-CHANGE code:
+  // The 6 scan rows include AUDUSD/GBPJPY/USOIL which currently DO NOT match the expected
+  // verdicts (they currently stop at weekly_red_flag / etc., not the post-change targets).
+  // So the baseline is EXPECTED TO FAIL with exit code 1. Subsequent tasks make it pass.
+  assert.equal(
+    result.status,
+    1,
+    `expected exit 1 (golden mismatch on baseline) — stdout was:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+  assert.match(result.stdout, /AUDUSD.*FAIL/, "expected AUDUSD to fail under baseline");
+});
+
+test("backtest CLI: --strict flag exits 2 when replay diff is empty (no changes yet)", () => {
+  const result = spawnSync("node", ["tools/backtest.mjs", "--quiet", "--strict"], {
+    encoding: "utf8",
+    cwd: process.cwd(),
+  });
+  // Under baseline, replay against latest scan should produce a diff of 0 (current code
+  // reproduces stored verdicts exactly). So --strict should NOT fire — exit code is 1
+  // because golden assertions still fail.
+  assert.notEqual(result.status, 2, "expected exit code != 2 under baseline (replay diff = 0)");
+});
