@@ -85,3 +85,38 @@ test("replayResult: full pipeline runs when monthly + weekly + daily all valid",
   assert.equal(result.stop_reason, null);
   assert.equal(result.confluence_grade !== "—", true, `expected non-stop grade, got ${result.confluence_grade}`);
 });
+
+test("replayResult: does not mutate the caller's nested cell fields", () => {
+  // Regression test for the shallow-copy bug found in T1 code review:
+  // validateCellConsistency mutates candle_verdict.liquidity_swept when its
+  // sweep gate fails. With a shallow spread, those writes leak back to the
+  // caller's input. With structuredClone, they don't.
+  const cells = {
+    monthly: null,
+    weekly: {
+      direction: "long",
+      candle_verdict: {
+        in_bias: true,
+        // liquidity_swept claim that the gate will reject (high not above prior)
+        liquidity_swept: "above_prior_high",
+      },
+      measurements: {
+        current_closed_bar: {
+          color: "green",
+          body_pct_of_range: 80,
+          close_position: "upper_third",
+          high_vs_prior_bar_high: "below",
+          low_vs_prior_bar_low: "above",
+        },
+      },
+    },
+    daily: null,
+  };
+  const before = cells.weekly.candle_verdict.liquidity_swept;
+  replayResult(cells);
+  assert.equal(
+    cells.weekly.candle_verdict.liquidity_swept,
+    before,
+    "replayResult should not mutate the caller's nested candle_verdict",
+  );
+});

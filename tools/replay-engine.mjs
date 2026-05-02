@@ -10,9 +10,12 @@ import {
 // Returns { stopped_at, stop_reason, monthly, weekly, daily, confluence_grade } shaped
 // like an evaluateSymbolV2() result so the caller can diff it against the stored result.
 export function replayResult(rawCells) {
-  const monthly = rawCells.monthly ? validateCellConsistency({ ...rawCells.monthly }) : null;
-  const weekly = rawCells.weekly ? validateCellConsistency({ ...rawCells.weekly }) : null;
-  const daily = rawCells.daily ? validateCellConsistency({ ...rawCells.daily }) : null;
+  // Deep-clone before validating: validateCellConsistency mutates nested fields
+  // (candle_verdict.liquidity_swept, candle_verdict.in_bias). A shallow spread
+  // would let those writes leak back into the caller's input on repeated calls.
+  const monthly = rawCells.monthly ? validateCellConsistency(structuredClone(rawCells.monthly)) : null;
+  const weekly = rawCells.weekly ? validateCellConsistency(structuredClone(rawCells.weekly)) : null;
+  const daily = rawCells.daily ? validateCellConsistency(structuredClone(rawCells.daily)) : null;
 
   const out = {
     stopped_at: null,
