@@ -148,5 +148,8 @@ test("backtest CLI: --strict flag exits 2 when replay diff is empty (no changes 
   // Under baseline, replay against latest scan should produce a diff of 0 (current code
   // reproduces stored verdicts exactly). So --strict should NOT fire — exit code is 1
   // because golden assertions still fail.
+  // TODO(T6+): once gate retunings land, replay diff becomes non-empty AND golden
+  // passes — at that point this test should assert exit 0 (not !== 2). Update or
+  // delete here when the meaning of "baseline" changes.
   assert.notEqual(result.status, 2, "expected exit code != 2 under baseline (replay diff = 0)");
 });

@@ -10,10 +10,17 @@ function parseArgs(argv) {
     quiet: false,
     strict: false,
   };
+  const requireValue = (flag, val) => {
+    if (!val || val.startsWith("--")) {
+      console.error(`Error: ${flag} requires a path argument`);
+      process.exit(1);
+    }
+    return val;
+  };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--scan") opts.scan = argv[++i];
-    else if (a === "--golden") opts.golden = argv[++i];
+    if (a === "--scan") opts.scan = requireValue("--scan", argv[++i]);
+    else if (a === "--golden") opts.golden = requireValue("--golden", argv[++i]);
     else if (a === "--quiet") opts.quiet = true;
     else if (a === "--strict") opts.strict = true;
     else if (a === "--help" || a === "-h") {
