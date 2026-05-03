@@ -845,7 +845,15 @@ export function sweepGateSatisfied(claim, measurements) {
 //
 // Cells with no `measurements` (legacy shape) or `parse_failed=true` pass
 // through unchanged — we only validate cells that have committed to numbers.
-export function validateCellConsistency(cell) {
+//
+// `fallbackDirection` is for daily cells: they don't carry a `direction` field
+// of their own (only `direction_conflict`), so they inherit bias from the
+// weekly. Callers pass `weekly.direction` so daily red-flag gates can actually
+// evaluate against measurements. Without this, every daily flag short-circuits
+// to "keep" because `direction` is undefined and `gateSatisfied` returns true
+// on its "no bias" branch. Default null preserves the legacy single-arg
+// behavior for monthly/weekly callers (they have direction natively).
+export function validateCellConsistency(cell, fallbackDirection = null) {
   if (!cell || cell.parse_failed) return cell;
   if (!cell.measurements) return cell;
 
@@ -853,7 +861,7 @@ export function validateCellConsistency(cell) {
 
   // 1. Drop self-contradicting red flags
   if (Array.isArray(cell.red_flags) && cell.red_flags.length > 0) {
-    const direction = cell.direction;
+    const direction = cell.direction || fallbackDirection;
     const kept = [];
     for (const flag of cell.red_flags) {
       if (gateSatisfied(flag, cell.measurements, direction)) {
@@ -1335,8 +1343,9 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     used_fallback: usedFallback && !parseFailed,
   };
   // Run consistency check BEFORE state derivation so dropped flags change
-  // the NONE/WATCH/ENTER outcome.
-  cell = validateCellConsistency(cell);
+  // the NONE/WATCH/ENTER outcome. Daily cells have no `direction` of their
+  // own — pass weekly.direction as fallback so red-flag gates can evaluate.
+  cell = validateCellConsistency(cell, weeklyCell?.direction);
   cell.setup_match = computeSetupMatchCount(cell);
   // Authoritative state computation — the scanner's code is the source of
   // truth for NONE/WATCH/ENTER, not the prompt's self-reported field.

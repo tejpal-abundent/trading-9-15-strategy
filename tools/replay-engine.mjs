@@ -17,7 +17,12 @@ export function replayResult(rawCells) {
   // would let those writes leak back into the caller's input on repeated calls.
   const monthly = rawCells.monthly ? validateCellConsistency(structuredClone(rawCells.monthly)) : null;
   const weekly = rawCells.weekly ? validateCellConsistency(structuredClone(rawCells.weekly)) : null;
-  const daily = rawCells.daily ? validateCellConsistency(structuredClone(rawCells.daily)) : null;
+  // Daily cells inherit bias from weekly — pass weekly?.direction as the
+  // fallback so red-flag gates can actually evaluate against measurements.
+  // Order matters: weekly must be validated first so its direction is final.
+  const daily = rawCells.daily
+    ? validateCellConsistency(structuredClone(rawCells.daily), weekly?.direction)
+    : null;
 
   const out = {
     stopped_at: null,
