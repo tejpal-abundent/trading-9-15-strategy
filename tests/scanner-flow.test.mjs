@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ltfCellState, evaluateHtfChain, dailyCellState, dailyTriggerType } from "../src/scanner.js";
+import { ltfCellState, evaluateHtfChain, dailyCellState, dailyTriggerType, weeklyStopDecision } from "../src/scanner.js";
 
 // ─── ltfCellState — NONE: insufficient prep or red flags ─────────────────
 
@@ -506,4 +506,59 @@ test("dailyCellState: winner_strength=6 but in_bias=false → WATCH", () => {
     candle_verdict: { in_bias: false, winner_strength: 6, pattern: "solid_bull", liquidity_swept: "none" },
   });
   assert.equal(dailyCellState(cell), "WATCH");
+});
+
+// ─── P6: weekly stop logic with fatal/warning split ──────────────────────
+
+function mkWeekly(over = {}) {
+  return {
+    direction: "long",
+    direction_conflict: false,
+    score: 7,
+    red_flags: [],
+    candle_verdict: { in_bias: true },
+    measurements: {
+      current_closed_bar: { color: "green", body_pct_of_range: 70, close_position: "upper_third" },
+    },
+    ...over,
+  };
+}
+
+test("weeklyStopDecision: no flags + score 7 + strong candle → null (no stop)", () => {
+  assert.equal(weeklyStopDecision(mkWeekly()), null);
+});
+
+test("weeklyStopDecision: fatal flag exhaustion → weekly_red_flag_fatal", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["exhaustion"] }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_fatal");
+  assert.deepEqual(d?.flags, ["exhaustion"]);
+});
+
+test("weeklyStopDecision: warning flag + strong candle + score 7 → null", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure"] }));
+  assert.equal(d, null);
+});
+
+test("weeklyStopDecision: warning flag + weak candle → weekly_red_flag_warning_no_compensation", () => {
+  const d = weeklyStopDecision(mkWeekly({
+    red_flags: ["choppy_structure"],
+    candle_verdict: { in_bias: false },
+  }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_warning_no_compensation");
+});
+
+test("weeklyStopDecision: warning + strong candle + score 6 → weekly_quality_low (score floor still applies)", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure"], score: 6 }));
+  assert.equal(d?.stop_reason, "weekly_quality_low");
+});
+
+test("weeklyStopDecision: unknown flag treated as fatal", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["xyz"] }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_fatal");
+});
+
+test("weeklyStopDecision: mixed fatal + warning → fatal (fatal wins)", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure", "exhaustion"] }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_fatal");
+  assert.deepEqual(d?.flags, ["exhaustion"]);
 });

@@ -3,6 +3,7 @@ import {
   dailyCellState,
   dailyTriggerType,
   deriveConfluence,
+  weeklyStopDecision,
 } from "../src/scanner.js";
 
 // replayResult: takes raw cells (as they appear inside scan-results JSON) and runs
@@ -56,14 +57,13 @@ export function replayResult(rawCells) {
     out.stop_reason = "weekly_no_setup";
     return out;
   }
-  if ((weekly.red_flags || []).length > 0) {
+  // P6: fatal/warning split + isCandleStrongInBias compensation. Must use the
+  // same decision function as evaluateSymbolV2 so replay stop_reasons match
+  // the live scanner's exactly.
+  const weeklyStop = weeklyStopDecision(weekly);
+  if (weeklyStop) {
     out.stopped_at = "1W";
-    out.stop_reason = "weekly_red_flag";
-    return out;
-  }
-  if ((weekly.score ?? 0) < 7) {
-    out.stopped_at = "1W";
-    out.stop_reason = "weekly_quality_low";
+    out.stop_reason = weeklyStop.stop_reason;
     return out;
   }
 

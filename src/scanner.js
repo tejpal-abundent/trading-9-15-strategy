@@ -26,6 +26,81 @@ const RESULT_DIR = "scan-results";
 // rubric grades 5-7). Was 7 previously, which forced the model to overshoot.
 const ENTER_WINNER_STRENGTH_THRESHOLD = 6;
 
+// P6: Red-flag classification.
+// Fatal flags always stop the cascade. Warning flags allow a score-7 cell
+// to pass IF the candle is strongly in-bias (see isCandleStrongInBias).
+// Unknown flags are treated as fatal (conservative default — surfaces a
+// new flag that hasn't been classified yet).
+const FATAL_RED_FLAGS = new Set(["exhaustion", "direction_conflict"]);
+const WARNING_RED_FLAGS = new Set(["choppy_structure", "tangled_emas"]);
+
+export function classifyRedFlags(flags) {
+  const out = { fatal: [], warning: [], unknown: [] };
+  if (!Array.isArray(flags)) return out;
+  for (const f of flags) {
+    if (FATAL_RED_FLAGS.has(f)) out.fatal.push(f);
+    else if (WARNING_RED_FLAGS.has(f)) out.warning.push(f);
+    else out.unknown.push(f);
+  }
+  return out;
+}
+
+// P6: Compensation rule for warning-class red flags. A weekly cell with only
+// warning flags can pass score 7 IF its current closed bar is decisively in
+// bias — body ≥ 60%, close at extreme/upper-third (long) or extreme/lower-third
+// (short), and color matches direction.
+export function isCandleStrongInBias(weeklyCell) {
+  const v = weeklyCell?.candle_verdict;
+  const m = weeklyCell?.measurements?.current_closed_bar;
+  const dir = weeklyCell?.direction;
+  if (!v || !m || !dir) return false;
+  if (v.in_bias !== true) return false;
+  if ((m.body_pct_of_range ?? 0) < 60) return false;
+
+  if (dir === "long") {
+    return (
+      m.color === "green" &&
+      (m.close_position === "at_high" || m.close_position === "upper_third")
+    );
+  }
+  if (dir === "short") {
+    return (
+      m.color === "red" &&
+      (m.close_position === "at_low" || m.close_position === "lower_third")
+    );
+  }
+  return false;
+}
+
+// P6: Decides whether a weekly cell should stop the cascade. Returns null
+// when the cascade should continue, or { stop_reason, flags } when it stops.
+// Pure function — no side effects, just reads the cell.
+export function weeklyStopDecision(weekly) {
+  if (!weekly) return null;
+
+  const { fatal, warning, unknown } = classifyRedFlags(weekly.red_flags || []);
+  const blocking = [...fatal, ...unknown];
+
+  if (blocking.length > 0) {
+    return { stop_reason: "weekly_red_flag_fatal", flags: blocking };
+  }
+
+  const score = weekly.score ?? 0;
+
+  if (warning.length > 0) {
+    if (!isCandleStrongInBias(weekly)) {
+      return { stop_reason: "weekly_red_flag_warning_no_compensation", flags: warning };
+    }
+    // warning + strong candle: warnings tolerated, fall through to score check.
+  }
+
+  if (score < 7) {
+    return { stop_reason: "weekly_quality_low", flags: [] };
+  }
+
+  return null;
+}
+
 // Filesystem-safe slug from a watchlist entry's TV symbol.
 export function slugify(label) {
   return label.replace(/[^A-Za-z0-9_-]/g, "_");
@@ -1243,19 +1318,16 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
     return result;
   }
 
-  if ((result.weekly.red_flags || []).length > 0) {
+  // P6: fatal/warning split + isCandleStrongInBias compensation.
+  const stopDecision = weeklyStopDecision(result.weekly);
+  if (stopDecision) {
     result.stopped_at = "1W";
-    result.stop_reason = "weekly_red_flag";
-    log(
-      `    🚫 STOP @ 1W: weekly_red_flag (${result.weekly.red_flags.join(", ")})`,
-    );
-    return result;
-  }
-
-  if ((result.weekly.score ?? 0) < 7) {
-    result.stopped_at = "1W";
-    result.stop_reason = "weekly_quality_low";
-    log(`    🚫 STOP @ 1W: weekly_quality_low (score ${result.weekly.score})`);
+    result.stop_reason = stopDecision.stop_reason;
+    if (stopDecision.flags.length > 0) {
+      log(`    🚫 STOP @ 1W: ${stopDecision.stop_reason} (${stopDecision.flags.join(", ")})`);
+    } else {
+      log(`    🚫 STOP @ 1W: ${stopDecision.stop_reason} (score ${result.weekly.score})`);
+    }
     return result;
   }
 
