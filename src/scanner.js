@@ -72,6 +72,30 @@ export function isCandleStrongInBias(weeklyCell) {
   return false;
 }
 
+// P3: Trend-dominance precondition. When monthly + weekly are unambiguously
+// trending in the same direction (wide/normal weekly EMAs, steep/medium slopes
+// on both TFs, no weekly flags), the daily can reach WATCH on prep ≥ 1 instead
+// of the standard prep ≥ 2 floor. Used by dailyCellState.
+export function isTrendDominant(monthly, weekly) {
+  if (!monthly || !weekly) return false;
+  if (monthly.direction !== weekly.direction) return false;
+  if (monthly.direction === "none" || weekly.direction === "none") return false;
+  if ((weekly.red_flags || []).length > 0) return false;
+
+  const me = monthly.measurements?.ema_state;
+  const we = weekly.measurements?.ema_state;
+  if (!me || !we) return false;
+
+  const wideEnough = (d) => d === "wide" || d === "normal";
+  const steepEnough = (s) => s === "steep" || s === "medium";
+
+  return (
+    wideEnough(we.ema9_ema15_distance) &&
+    steepEnough(we.slope_steepness) &&
+    steepEnough(me.slope_steepness)
+  );
+}
+
 // P6: Decides whether a weekly cell should stop the cascade. Returns null
 // when the cascade should continue, or { stop_reason, flags } when it stops.
 // Pure function — no side effects, just reads the cell.
@@ -148,14 +172,29 @@ export function ltfCellState(cell) {
 //
 // Authoritative in code — if the prompt's self-reported state disagrees, the
 // scanner trusts this computation.
-export function dailyCellState(cell) {
+export function dailyCellState(cell, monthly = null, weekly = null) {
   if (!cell || typeof cell !== "object") return "NONE";
   if (cell.direction_conflict === true) return "NONE";
+
   const flags = cell.red_flags || [];
   if (flags.length > 0) return "NONE";
-  if ((cell.prep_signals_count ?? 0) < 2) return "NONE";
+
+  const prep = cell.prep_signals_count ?? 0;
+  const dominant = isTrendDominant(monthly, weekly);
+  const watchFloor = dominant ? 1 : 2;
+
+  if (prep < watchFloor) return "NONE";
+
   const v = cell.candle_verdict;
   if (!v || typeof v !== "object") return "NONE";
+
+  // Trend-dominant prep=1 path: only WATCH (never ENTER), and requires in_bias + strength ≥ 5
+  if (dominant && prep === 1) {
+    if (v.in_bias === true && (v.winner_strength ?? 0) >= 5) return "WATCH";
+    return "NONE";
+  }
+
+  // Standard ENTER/WATCH path
   if (v.in_bias !== true) return "WATCH";
   if ((v.winner_strength ?? 0) < ENTER_WINNER_STRENGTH_THRESHOLD) return "WATCH";
   return "ENTER";
@@ -1160,7 +1199,7 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
   cell = validateCellConsistency(cell);
   // Authoritative state computation — the scanner's code is the source of
   // truth for NONE/WATCH/ENTER, not the prompt's self-reported field.
-  cell.state = dailyCellState(cell);
+  cell.state = dailyCellState(cell, monthlyCell, weeklyCell);
   cell.trigger_type = dailyTriggerType(cell, weeklyCell.direction);
   return cell;
 }

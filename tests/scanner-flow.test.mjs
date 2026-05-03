@@ -562,3 +562,67 @@ test("weeklyStopDecision: mixed fatal + warning → fatal (fatal wins)", () => {
   assert.equal(d?.stop_reason, "weekly_red_flag_fatal");
   assert.deepEqual(d?.flags, ["exhaustion"]);
 });
+
+// ─── P3: trend-dominant daily WATCH override ─────────────────────────────
+
+function mkMonthlyDominant(over = {}) {
+  return {
+    direction: "long",
+    measurements: {
+      ema_state: { ema9_above_ema15: true, ema9_ema15_distance: "wide", slope_direction: "up", slope_steepness: "medium" },
+    },
+    ...over,
+  };
+}
+function mkWeeklyDominant(over = {}) {
+  return {
+    direction: "long",
+    red_flags: [],
+    measurements: {
+      ema_state: { ema9_above_ema15: true, ema9_ema15_distance: "wide", slope_direction: "up", slope_steepness: "steep" },
+    },
+    ...over,
+  };
+}
+
+test("dailyCellState: trend-dominant + prep=1 + in_bias decisive → WATCH", () => {
+  const cell = mkDailyCell({
+    prep_signals_count: 1,
+    angle_ok: true,
+    zone_rejection: false,
+    coc_present: false,
+    solid_continuation: false,
+    setup_type: "none",
+    candle_verdict: { in_bias: true, winner_strength: 5, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "WATCH");
+});
+
+test("dailyCellState: trend-dominant + prep=1 + counter-bias → NONE", () => {
+  const cell = mkDailyCell({
+    prep_signals_count: 1,
+    setup_type: "none",
+    candle_verdict: { in_bias: false, winner_strength: 5, pattern: "none", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "NONE");
+});
+
+test("dailyCellState: NOT trend-dominant + prep=1 → NONE (standard floor)", () => {
+  const cell = mkDailyCell({
+    prep_signals_count: 1,
+    setup_type: "none",
+    candle_verdict: { in_bias: true, winner_strength: 7 },
+  });
+  assert.equal(dailyCellState(cell, null, null), "NONE");
+});
+
+test("dailyCellState: trend-dominant + prep=2 + in_bias + strength 6 → ENTER (standard ENTER path)", () => {
+  const cell = mkDailyCell({
+    prep_signals_count: 2,
+    angle_ok: true,
+    zone_rejection: true,
+    setup_type: "none",
+    candle_verdict: { in_bias: true, winner_strength: 6, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "ENTER");
+});
