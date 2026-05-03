@@ -154,6 +154,145 @@ function makeAttachment(symbol, tf, imagePath, attachments) {
 
 const FONT = `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
 
+// V2.1 — render a structured reasoning_block as stacked sections. Falls back
+// to the legacy 1-line `reasoning` string when the block is absent.
+function renderReasoningBlock(rb, fallback) {
+  if (!rb || typeof rb !== "object") {
+    if (!fallback) return "";
+    return `<p style="margin:8px 0 0 0;font-size:12px;color:#374151;font-family:${FONT};">${htmlEscape(fallback)}</p>`;
+  }
+  const labels = [
+    ["htf_context", "HTF context"],
+    ["context", "Context"],
+    ["maturity_read", "Maturity"],
+    ["candle_anatomy", "Candle anatomy"],
+    ["structure_read", "Structure"],
+    ["poi_read", "POI"],
+    ["sequence_read", "Sequence"],
+    ["trigger_anatomy", "Trigger"],
+    ["competition", "Competition"],
+    ["plan", "Plan"],
+  ];
+  const rows = labels
+    .filter(([k]) => rb[k])
+    .map(
+      ([k, label]) => `
+      <tr>
+        <td style="padding:3px 8px 3px 0;color:#6b7280;font-size:11px;white-space:nowrap;font-family:${FONT};vertical-align:top;font-weight:600;">${label}</td>
+        <td style="padding:3px 0;font-size:12px;color:#1f2937;font-family:${FONT};">${htmlEscape(rb[k])}</td>
+      </tr>`
+    )
+    .join("");
+  if (!rows) {
+    if (!fallback) return "";
+    return `<p style="margin:8px 0 0 0;font-size:12px;color:#374151;font-family:${FONT};">${htmlEscape(fallback)}</p>`;
+  }
+  return `
+    <table style="border-collapse:collapse;margin-top:8px;width:100%;background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:6px;">
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// V2.1 — render the trade plan (entry, invalidation, target, RR) as a small
+// fact box. Returns empty string when trade_plan is absent.
+function renderTradePlan(tp) {
+  if (!tp || typeof tp !== "object") return "";
+  const fmt = (v) => (typeof v === "number" ? v.toFixed(4).replace(/\.?0+$/, "") : "—");
+  const rows = [
+    ["Entry ~", fmt(tp.entry_price_approx)],
+    [`Invalidation (${htmlEscape(tp.invalidation_basis || "—")})`, fmt(tp.invalidation_level)],
+    [`Target (${htmlEscape(tp.target_basis || "—")})`, fmt(tp.target_level)],
+    ["Risk / Reward (ATR)", `${fmt(tp.risk_atr)} / ${fmt(tp.reward_atr)}`],
+    ["RR ratio", typeof tp.rr_ratio === "number" ? `<strong>${tp.rr_ratio.toFixed(2)}</strong>` : "—"],
+  ];
+  const html = rows
+    .map(
+      ([k, v]) => `
+        <tr>
+          <td style="padding:3px 8px 3px 0;color:#6b7280;font-size:11px;white-space:nowrap;font-family:${FONT};">${k}</td>
+          <td style="padding:3px 0;font-size:11px;color:#374151;font-family:${FONT};">${v}</td>
+        </tr>`
+    )
+    .join("");
+  return `
+    <div style="margin-top:8px;padding:6px 10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:4px;">
+      <p style="margin:0 0 4px 0;font-size:11px;font-weight:600;color:#1e40af;font-family:${FONT};">Trade plan</p>
+      <table style="border-collapse:collapse;"><tbody>${html}</tbody></table>
+    </div>`;
+}
+
+// V2.1 — render the last_5_candles narrative as a horizontal mini-table.
+function renderSequenceTable(measurements) {
+  const arr = measurements?.last_5_candles;
+  if (!Array.isArray(arr) || arr.length === 0) return "";
+  const headers = arr
+    .map(
+      (b) => `<th style="padding:3px 6px;font-size:10px;font-weight:600;color:#6b7280;font-family:${FONT};border-bottom:1px solid #e5e7eb;">i=${b.index ?? "?"}</th>`,
+    )
+    .join("");
+  const colors = arr
+    .map(
+      (b) => `<td style="padding:3px 6px;font-size:11px;color:${b.color === "green" ? "#15803d" : "#991b1b"};font-family:${FONT};">${htmlEscape(b.color || "—")}</td>`,
+    )
+    .join("");
+  const roles = arr
+    .map(
+      (b) => `<td style="padding:3px 6px;font-size:11px;color:#1f2937;font-family:${FONT};">${htmlEscape(b.role || "—")}</td>`,
+    )
+    .join("");
+  const patterns = arr
+    .map(
+      (b) => `<td style="padding:3px 6px;font-size:11px;color:#374151;font-family:${FONT};">${htmlEscape(b.pattern || "—")}</td>`,
+    )
+    .join("");
+  const bodies = arr
+    .map(
+      (b) => `<td style="padding:3px 6px;font-size:11px;color:#374151;font-family:${FONT};">${b.body_pct_of_range ?? "—"}%</td>`,
+    )
+    .join("");
+  return `
+    <div style="margin-top:8px;">
+      <p style="margin:0 0 4px 0;font-size:11px;font-weight:600;color:#374151;font-family:${FONT};">Last 5 daily candles</p>
+      <table style="border-collapse:collapse;">
+        <thead><tr><th style="padding:3px 6px;text-align:left;font-size:10px;color:#9ca3af;font-family:${FONT};">bar</th>${headers}</tr></thead>
+        <tbody>
+          <tr><td style="padding:3px 6px;font-size:10px;color:#9ca3af;font-family:${FONT};">color</td>${colors}</tr>
+          <tr><td style="padding:3px 6px;font-size:10px;color:#9ca3af;font-family:${FONT};">role</td>${roles}</tr>
+          <tr><td style="padding:3px 6px;font-size:10px;color:#9ca3af;font-family:${FONT};">pattern</td>${patterns}</tr>
+          <tr><td style="padding:3px 6px;font-size:10px;color:#9ca3af;font-family:${FONT};">body%</td>${bodies}</tr>
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// V2.1 — render the POI confluence + competition summary inline.
+function renderPoiCompetition(daily) {
+  const poi = daily?.poi_confluence;
+  const comp = daily?.competition;
+  if (!poi && !comp) return "";
+  const poiRows = poi
+    ? `
+      <tr>
+        <td style="padding:2px 8px 2px 0;font-size:11px;color:#6b7280;font-family:${FONT};white-space:nowrap;">POI count</td>
+        <td style="padding:2px 0;font-size:11px;color:#1f2937;font-family:${FONT};"><strong>${poi.count ?? "—"}/4</strong> ${poi.primary_poi_description ? `— ${htmlEscape(poi.primary_poi_description)}` : ""}</td>
+      </tr>`
+    : "";
+  const compRows = comp
+    ? `
+      <tr>
+        <td style="padding:2px 8px 2px 0;font-size:11px;color:#6b7280;font-family:${FONT};white-space:nowrap;">Competition</td>
+        <td style="padding:2px 0;font-size:11px;color:#1f2937;font-family:${FONT};">winner=<strong>${htmlEscape(comp.competition_winner || "—")}</strong>, sweep+disp=${comp.sweep_then_displacement ? "yes" : "no"}, accept=${htmlEscape(comp.acceptance || "—")}</td>
+      </tr>
+      ${comp.notes ? `<tr><td colspan="2" style="padding:2px 0 0 0;font-size:11px;color:#4b5563;font-style:italic;font-family:${FONT};">${htmlEscape(comp.notes)}</td></tr>` : ""}`
+    : "";
+  return `
+    <div style="margin-top:8px;">
+      <table style="border-collapse:collapse;">
+        <tbody>${poiRows}${compRows}</tbody>
+      </table>
+    </div>`;
+}
+
 function renderCandleVerdict(cv) {
   if (!cv) return `<span style="color:#9ca3af;font-size:12px;">candle verdict unavailable</span>`;
 
@@ -210,6 +349,15 @@ function renderTfBlock(label, cell, symbol, tfKey, attachments) {
   const tf = cell.tf || tfKey.toUpperCase().replace("LY", "").replace("WEEK", "1W").replace("MONTH", "1M").replace("DAIL", "1D");
   const imageHtml = renderImage(symbol, tf, cell.image, attachments);
 
+  // V2.1 surface bits per TF
+  const maturityTag = cell.move_maturity
+    ? ` — Maturity: <strong>${htmlEscape(cell.move_maturity)}</strong>`
+    : "";
+  const sequenceTable = cell.tf === "1D" ? renderSequenceTable(cell.measurements) : "";
+  const poiCompBlock = cell.tf === "1D" ? renderPoiCompetition(cell) : "";
+  const tradePlanBlock = cell.tf === "1D" ? renderTradePlan(cell.trade_plan) : "";
+  const reasoningHtml = renderReasoningBlock(cell.reasoning_block, cell.reasoning);
+
   return `
     <div style="margin-bottom:24px;">
       <h4 style="margin:0 0 6px 0;font-size:13px;font-weight:600;color:#374151;font-family:${FONT};border-bottom:1px solid #e5e7eb;padding-bottom:4px;">
@@ -217,12 +365,16 @@ function renderTfBlock(label, cell, symbol, tfKey, attachments) {
         ${cell.direction ? ` — ${dirIcon(cell.direction)}` : ""}
         ${cell.score != null ? ` — Score: ${cell.score}/10` : ""}
         ${cell.state ? ` — State: <strong>${htmlEscape(cell.state)}</strong>` : ""}
+        ${maturityTag}
       </h4>
       ${imageHtml}
       <div style="margin-top:6px;">
         ${renderCandleVerdict(cell.candle_verdict)}
       </div>
-      ${cell.reasoning ? `<p style="margin:8px 0 0 0;font-size:12px;color:#374151;font-family:${FONT};">${htmlEscape(cell.reasoning)}</p>` : ""}
+      ${sequenceTable}
+      ${poiCompBlock}
+      ${tradePlanBlock}
+      ${reasoningHtml}
       ${cell.red_flags && cell.red_flags.length
         ? `<p style="margin:4px 0 0 0;font-size:11px;color:#9a3412;font-family:${FONT};">
             Red flags: ${cell.red_flags.map(htmlEscape).join(", ")}
@@ -271,15 +423,22 @@ function renderCandidateCard(r, attachments) {
       </div>
 
       <!-- Daily reasoning highlighted -->
-      ${r.daily?.reasoning ? `
+      ${r.daily?.reasoning || r.daily?.reasoning_block?.plan ? `
       <div style="padding:12px 16px;background:#f8fafc;border-bottom:1px solid #e5e7eb;">
         <p style="margin:0;font-size:13px;color:#1e293b;font-family:${FONT};">
-          <strong>Daily outlook:</strong> ${htmlEscape(r.daily.reasoning)}
+          <strong>Daily outlook:</strong> ${htmlEscape(r.daily.reasoning_block?.plan || r.daily.reasoning)}
         </p>
         ${r.daily.trigger_type && r.daily.trigger_type !== "none"
           ? `<p style="margin:4px 0 0 0;font-size:12px;color:#374151;font-family:${FONT};">
               Trigger: <strong>${htmlEscape(r.daily.trigger_type)}</strong>
               ${r.daily.prep_signals_count != null ? ` &nbsp;|&nbsp; Prep signals: ${r.daily.prep_signals_count}/4` : ""}
+              ${typeof r.daily.poi_confluence?.count === "number" ? ` &nbsp;|&nbsp; POI: <strong>${r.daily.poi_confluence.count}/4</strong>` : ""}
+              ${typeof r.daily.trade_plan?.rr_ratio === "number" ? ` &nbsp;|&nbsp; RR: <strong>${r.daily.trade_plan.rr_ratio.toFixed(2)}</strong>` : ""}
+             </p>`
+          : ""}
+        ${r.cluster_decision?.kept === false
+          ? `<p style="margin:4px 0 0 0;font-size:12px;color:#9a3412;font-family:${FONT};">
+              ⚠️ Cluster-demoted (${htmlEscape(r.cluster_decision.dominant_cluster || "?")} full) — duplicate of a higher-grade candidate in the same cluster + direction.
              </p>`
           : ""}
       </div>` : ""}

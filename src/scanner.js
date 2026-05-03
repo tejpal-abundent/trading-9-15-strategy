@@ -19,10 +19,28 @@ import {
 import { askGeminiVision, getTodaysCost, recordCost, fillRubric } from "./visual.js";
 import { fetchCandles, emaAlignment, agree } from "./higher-tf.js";
 import { loadPriorRunsForWatchlist, derivePriorContext } from "./history.js";
+import { clusterDedupe } from "./clusters.js";
 
 const HTF_TIMEFRAMES = ["1M", "1W", "1D"];
 const LTF_TIMEFRAMES = ["4H", "2H", "1H"];
 const RESULT_DIR = "scan-results";
+
+// V2.1 (high win-rate upgrade) — minimum reward:risk for daily ENTER. Daily
+// cells whose `trade_plan.rr_ratio` is below this floor are downgraded to
+// WATCH even if every other gate passes. Win rate is meaningless without R:R:
+// 60% at 1:1 loses to 40% at 1:3.
+const MIN_ENTER_RR = 2.0;
+// Stricter floors at the grade boundaries (used by deriveConfluence). Earned
+// by raising the bar on what counts as a top-tier setup.
+const MIN_RR_FOR_A_PLUS = 3.0;
+const MIN_RR_FOR_A = 2.5;
+
+// V2.1 — ATR-normalised body strength. A candle counts as an "expansion" /
+// solid bar only when its body is at least this multiple of recent ATR(14).
+// `body_pct_of_range ≥ 60` alone allows a tiny inside-bar to pose as a solid
+// candle; the ATR clamp filters those out.
+const SOLID_BODY_ATR_MIN = 0.6;
+const STRONG_WINNER_BODY_ATR_MIN = 0.8;
 
 // P5: ENTER requires a decisive in-bias close. Threshold set at 6 to admit
 // "body ≥ 60% closing in upper/lower third" candles (which the daily prompt
@@ -264,6 +282,8 @@ export function ltfCellState(cell) {
 //           (candle_verdict.in_bias === false OR winner_strength < ENTER_WINNER_STRENGTH_THRESHOLD)
 //   ENTER — prep ready AND candle_verdict.in_bias === true
 //           AND winner_strength >= ENTER_WINNER_STRENGTH_THRESHOLD (decisive close in bias direction)
+//           AND trade_plan.rr_ratio >= MIN_ENTER_RR (when trade_plan present)
+//           AND not a "momentum-only trigger on late/exhausted monthly"
 //
 // Authoritative in code — if the prompt's self-reported state disagrees, the
 // scanner trusts this computation.
@@ -296,19 +316,48 @@ export function dailyCellState(cell, monthly = null, weekly = null) {
   if (v.in_bias === true && (v.winner_strength ?? 0) >= ENTER_WINNER_STRENGTH_THRESHOLD) {
     const isTypedSetup = cell.setup_type === "pullback" || cell.setup_type === "continuation";
     if (isTypedSetup && !requiredSatisfied) return "WATCH";
+
+    // V2.1 — RR gate. Below MIN_ENTER_RR the trade is mathematically not worth
+    // taking. Downgrade to WATCH so it shows on the report (the human can
+    // still decide) but it never auto-routes to a real ENTER signal.
+    const tp = cell.trade_plan;
+    if (tp && typeof tp.rr_ratio === "number" && tp.rr_ratio < MIN_ENTER_RR) {
+      return "WATCH";
+    }
+
+    // V2.1 — late/exhausted monthly + momentum-only trigger = trap territory.
+    // Sweep / pattern / sweep_displacement are still allowed (those ARE the
+    // reversals you want at extension), but pure momentum extension into a
+    // mature trend is the highest-loss trade in swing.
+    const tt = computeDailyTriggerType(cell, weekly?.direction);
+    if (tt === "momentum" && monthly &&
+        (monthly.move_maturity === "late" || monthly.move_maturity === "exhausted")) {
+      return "WATCH";
+    }
+
     return "ENTER";
   }
 
   return "WATCH";
 }
 
-// Classifies the ENTER reason. Priority: sweep (highest conviction) > pattern
-// > momentum. Returns "none" when state !== "ENTER" or bias is invalid.
-export function dailyTriggerType(cell, weeklyBias) {
-  if (!cell || dailyCellState(cell) !== "ENTER") return "none";
+// Classifies the trigger reason given a candle_verdict + bias. Pure — does NOT
+// require state=ENTER (used by dailyCellState itself to make the move-maturity
+// decision). Priority order, highest conviction first:
+//   sweep_displacement — bar swept liquidity AND the next/same bar fully
+//                        displaced back through the level (institutional)
+//   sweep              — liquidity grabbed and rejected in bias direction
+//   pattern            — named reversal/continuation pattern in bias direction
+//   momentum           — solid directional body
+//   none               — bias missing or candle_verdict missing
+export function computeDailyTriggerType(cell, weeklyBias) {
+  if (!cell || !cell.candle_verdict) return "none";
   if (weeklyBias !== "long" && weeklyBias !== "short") return "none";
   const v = cell.candle_verdict;
   const isLong = weeklyBias === "long";
+
+  // V2.1 — sweep + immediate displacement (highest conviction tier).
+  if (cell.competition?.sweep_then_displacement === true) return "sweep_displacement";
 
   // Sweep trigger — liquidity grabbed then rejected in bias direction
   const sweepMatch = isLong
@@ -328,8 +377,15 @@ export function dailyTriggerType(cell, weeklyBias) {
     : v.pattern === "solid_bear";
   if (momentumMatch) return "momentum";
 
-  // Fallback — cell satisfies ENTER thresholds but pattern didn't classify
   return "momentum";
+}
+
+// State-gated trigger type — same as computeDailyTriggerType but returns "none"
+// when the cell is not in ENTER state. This is what callers downstream of
+// dailyCellState should use.
+export function dailyTriggerType(cell, weeklyBias) {
+  if (!cell || dailyCellState(cell) !== "ENTER") return "none";
+  return computeDailyTriggerType(cell, weeklyBias);
 }
 
 // HTF_TIMEFRAMES order is fixed: index 0 = 1M, 1 = 1W, 2 = 1D.
@@ -811,6 +867,67 @@ export function gateSatisfied(flag, measurements, direction) {
   }
 }
 
+// V2.1 — Validates a per-bar `role` claim in `measurements.last_5_candles[]`
+// against that bar's own numeric measurements. Returns true when the role
+// is consistent (or no rule for it), false when the bar's numbers directly
+// contradict the role. Used by validateCellConsistency to drop unbacked
+// sequence-read narratives.
+export function roleGateSatisfied(role, bar) {
+  if (!role || !bar) return true;
+  switch (role) {
+    case "sweep": {
+      // A "sweep" bar must have wicked beyond the prior bar's high or low.
+      const wickedAbove = bar.high_vs_prior_bar_high === "above";
+      const wickedBelow = bar.low_vs_prior_bar_low === "below";
+      return wickedAbove || wickedBelow;
+    }
+    case "rejection": {
+      // A rejection candle has a dominant wick on at least one side.
+      const upper = bar.upper_wick_pct ?? 0;
+      const lower = bar.lower_wick_pct ?? 0;
+      const body = bar.body_pct_of_range ?? 0;
+      return Math.max(upper, lower) >= 40 && body <= 50;
+    }
+    case "absorption": {
+      // Absorption = small body, balanced wicks (a "spinning top"-style bar).
+      const body = bar.body_pct_of_range ?? 0;
+      const upper = bar.upper_wick_pct ?? 0;
+      const lower = bar.lower_wick_pct ?? 0;
+      return body <= 40 && upper + lower >= 40;
+    }
+    case "driver":
+    case "continuation": {
+      // A driver / continuation bar should be a solid body — body > 50% of
+      // range AND, when ATR is reported, body >= 0.6 ATR.
+      const body = bar.body_pct_of_range ?? 0;
+      if (body < 50) return false;
+      const atr = bar.body_atr_mult;
+      if (typeof atr === "number" && atr < SOLID_BODY_ATR_MIN) return false;
+      return true;
+    }
+    case "inside": {
+      // Inside bar = high below prior high AND low above prior low.
+      return (
+        bar.high_vs_prior_bar_high === "below" &&
+        bar.low_vs_prior_bar_low === "above"
+      );
+    }
+    default:
+      // pause, pullback, reversal — softly typed, no measurement gate.
+      return true;
+  }
+}
+
+// V2.1 — Body strength normalised to recent ATR. Returns true when the candle
+// either omits body_atr_mult (legacy / not measured) OR reports it at/above
+// the threshold. Used to clamp `solid_*` patterns and high `winner_strength`.
+export function bodyAtrGateSatisfied(bar, threshold = SOLID_BODY_ATR_MIN) {
+  if (!bar) return true;
+  const atr = bar.body_atr_mult;
+  if (typeof atr !== "number") return true;
+  return atr >= threshold;
+}
+
 // Validates a `liquidity_swept` claim from candle_verdict against the cell's
 // `measurements.current_closed_bar`. Returns false only if the model's claim
 // directly contradicts its own reported relationship to the prior bar.
@@ -891,6 +1008,83 @@ export function validateCellConsistency(cell, fallbackDirection = null) {
     }
   }
 
+  // 4. V2.1 — ATR clamp on solid_* patterns + winner_strength. A "solid"
+  // candle that's actually sub-ATR is a tight inside bar dressed up; downgrade
+  // both the pattern (→ "none") and the winner_strength (→ ≤ 5). This stops
+  // dailyCellState from issuing ENTER on a measurement-poor candle.
+  const v = cell.candle_verdict;
+  const c = cell.measurements.current_closed_bar;
+  if (v && c && typeof c.body_atr_mult === "number") {
+    const isSolidPattern = v.pattern === "solid_bull" || v.pattern === "solid_bear";
+    if (isSolidPattern && c.body_atr_mult < SOLID_BODY_ATR_MIN) {
+      log.push(`rejected pattern '${v.pattern}' — body_atr_mult ${c.body_atr_mult} < ${SOLID_BODY_ATR_MIN}`);
+      v.pattern = "none";
+    }
+    if (typeof v.winner_strength === "number" &&
+        v.winner_strength >= 8 &&
+        c.body_atr_mult < STRONG_WINNER_BODY_ATR_MIN) {
+      log.push(`clamped winner_strength ${v.winner_strength} → 5 — body_atr_mult ${c.body_atr_mult} < ${STRONG_WINNER_BODY_ATR_MIN}`);
+      v.winner_strength = 5;
+    }
+  }
+
+  // 5. V2.1 — Per-bar role gate on measurements.last_5_candles[]. Drop any
+  // role claim whose own bar measurements directly contradict it (e.g. a
+  // "sweep" bar that didn't actually wick beyond the prior high/low). The
+  // sequence_read narrative is only as honest as the per-bar roles.
+  if (Array.isArray(cell.measurements.last_5_candles)) {
+    for (let i = 0; i < cell.measurements.last_5_candles.length; i++) {
+      const bar = cell.measurements.last_5_candles[i];
+      if (!bar || !bar.role) continue;
+      if (!roleGateSatisfied(bar.role, bar)) {
+        log.push(`rejected last_5_candles[${i}].role '${bar.role}' — measurements contradict`);
+        bar.role = "pause"; // safest neutral fallback
+      }
+    }
+  }
+
+  // 6. V2.1 — competition.sweep_then_displacement requires (a) the prior bar
+  // (i.e. measurements.prior_bar) to have wicked beyond ITS prior high/low —
+  // we approximate this by requiring last_5_candles[-2].role === "sweep" when
+  // the array is present — and (b) the current closed bar to be a strongly
+  // in-bias body (body_atr_mult >= 0.6).
+  if (cell.competition?.sweep_then_displacement === true) {
+    const recent = cell.measurements.last_5_candles;
+    const sweepPriorBar =
+      Array.isArray(recent) && recent.length >= 2
+        ? recent[recent.length - 2]?.role === "sweep"
+        : null; // legacy cells without last_5_candles → can't verify, pass through
+    const displacementOk = bodyAtrGateSatisfied(c, SOLID_BODY_ATR_MIN);
+    if (sweepPriorBar === false || !displacementOk) {
+      log.push(
+        `rejected competition.sweep_then_displacement — ` +
+        `sweep_prior_bar=${sweepPriorBar} displacement_ok=${displacementOk}`,
+      );
+      cell.competition.sweep_then_displacement = false;
+    }
+  }
+
+  // 7. V2.1 — trade_plan sanity. If the model returned a non-positive risk_atr
+  // OR an rr_ratio that doesn't match (reward_atr / risk_atr) within 10%, the
+  // plan is unreliable — strip rr_ratio so deriveConfluence/dailyCellState
+  // fall back to the legacy "no RR known" path rather than trust a bad number.
+  const tp = cell.trade_plan;
+  if (tp && typeof tp.rr_ratio === "number") {
+    const risk = tp.risk_atr;
+    const reward = tp.reward_atr;
+    if (typeof risk === "number" && risk > 0 && typeof reward === "number" && reward >= 0) {
+      const computed = reward / risk;
+      const drift = Math.abs(computed - tp.rr_ratio) / Math.max(computed, 0.01);
+      if (drift > 0.1) {
+        log.push(`recomputed trade_plan.rr_ratio ${tp.rr_ratio} → ${computed.toFixed(2)} (drift ${(drift * 100).toFixed(0)}%)`);
+        tp.rr_ratio = Number(computed.toFixed(2));
+      }
+    } else if (!(risk > 0)) {
+      log.push(`stripped trade_plan.rr_ratio — risk_atr ${risk} not > 0`);
+      delete tp.rr_ratio;
+    }
+  }
+
   if (log.length > 0) {
     cell.consistency_log = (cell.consistency_log || []).concat(log);
   }
@@ -913,6 +1107,25 @@ const COLD_DAILY = "_No prior daily evaluation on file — this is a cold scan._
 function fmtCapturedAt(ts) {
   if (!ts) return "unknown";
   return ts.slice(0, 19).replace("T", " ") + " UTC";
+}
+
+// V2.1 — flatten weekly_poi[] into a single-line string for the daily prompt's
+// `{WEEKLY_POI_LIST}` placeholder. "none" when absent so the model knows
+// there are no levels to confluence with (rather than seeing an empty string
+// and guessing).
+export function formatWeeklyPoiList(weeklyPoi) {
+  if (!Array.isArray(weeklyPoi) || weeklyPoi.length === 0) return "none";
+  return weeklyPoi
+    .map((p, i) => {
+      const dist =
+        typeof p?.distance_to_current_close_atr === "number"
+          ? ` (${p.distance_to_current_close_atr >= 0 ? "+" : ""}${p.distance_to_current_close_atr.toFixed(2)} ATR)`
+          : "";
+      const desc = p?.level_description || "(unnamed)";
+      const kind = p?.kind || "?";
+      return `${i + 1}) ${kind}: ${desc}${dist}`;
+    })
+    .join("; ");
 }
 
 function fmtCandleVerdict(v) {
@@ -1001,10 +1214,14 @@ export function formatPriorContextDaily(priorContext) {
       continue;
     }
     const d = r.daily;
+    const rr = d.trade_plan?.rr_ratio;
+    const rrTag = typeof rr === "number" ? `, rr=${rr.toFixed(1)}` : "";
+    const poi = d.poi_confluence?.count;
+    const poiTag = typeof poi === "number" ? `, poi=${poi}/4` : "";
     lines.push(
       `**${label}** — ${stamp}\n` +
         `  - chain: ${monthlyDir} → ${weeklyDir} → **state=${d.state}** ` +
-        `(trigger=${d.trigger_type}, prep ${d.prep_signals_count}/4, grade=${r.confluence_grade})\n` +
+        `(trigger=${d.trigger_type}, prep ${d.prep_signals_count}/4, grade=${r.confluence_grade}${rrTag}${poiTag})\n` +
         `  - candle: ${fmtCandleVerdict(d.candle_verdict)}`,
     );
   }
@@ -1098,13 +1315,24 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBl
     });
   }
 
+  const mRb = result?.reasoning_block ?? null;
+  const mLegacyReasoning =
+    result?.reasoning ||
+    mRb?.context ||
+    mRb?.maturity_read ||
+    mRb?.candle_anatomy ||
+    "";
+
   const cell = {
     tf: "1M",
     direction: result?.direction,
     in_9_15_zone: !!result?.in_9_15_zone,
+    // V2.1 — move-maturity classification (early|mid|late|exhausted)
+    move_maturity: result?.move_maturity ?? null,
     candle_verdict: result?.candle_verdict ?? null,
     measurements: result?.measurements ?? null,
-    reasoning: result?.reasoning ?? "",
+    reasoning_block: mRb,
+    reasoning: mLegacyReasoning,
     image: imagePath,
     captured_at: capturedAt.toISOString(),
     cost_usd: totalCost,
@@ -1209,6 +1437,14 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     });
   }
 
+  const wRb = result?.reasoning_block ?? null;
+  const wLegacyReasoning =
+    result?.reasoning ||
+    wRb?.structure_read ||
+    wRb?.poi_read ||
+    wRb?.context ||
+    "";
+
   const cell = {
     tf: "1W",
     direction: result?.direction,
@@ -1223,7 +1459,10 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     score: result?.score ?? 0,
     candle_verdict: result?.candle_verdict ?? null,
     measurements: result?.measurements ?? null,
-    reasoning: result?.reasoning ?? "",
+    // V2.1
+    weekly_poi: result?.weekly_poi ?? [],
+    reasoning_block: wRb,
+    reasoning: wLegacyReasoning,
     image: imagePath,
     captured_at: capturedAt.toISOString(),
     cost_usd: totalCost,
@@ -1285,9 +1524,11 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     const prompt = fillRubric(rubric, {
       SYMBOL: item.label,
       MONTHLY_BIAS: monthlyCell.direction || "none",
+      MONTHLY_MOVE_MATURITY: monthlyCell.move_maturity || "unknown",
       WEEKLY_BIAS: weeklyCell.direction || "none",
       WEEKLY_SCORE: String(weeklyCell.score ?? 0),
       WEEKLY_PULLBACK_PRESENT: String(!!weeklyCell.pullback_present),
+      WEEKLY_POI_LIST: formatWeeklyPoiList(weeklyCell.weekly_poi),
       CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
       PRIOR_CONTEXT: priorBlock,
     });
@@ -1320,6 +1561,17 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     });
   }
 
+  // V2.1 — derive a 1-line legacy `reasoning` from reasoning_block.plan so the
+  // existing `report.js` rationale fallback keeps working when only the
+  // structured block is populated.
+  const rb = result?.reasoning_block ?? null;
+  const legacyReasoning =
+    result?.reasoning ||
+    rb?.plan ||
+    rb?.trigger_anatomy ||
+    rb?.competition ||
+    "";
+
   let cell = {
     tf: "1D",
     direction_conflict: !!result?.direction_conflict,
@@ -1333,7 +1585,13 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     red_flags: result?.red_flags ?? [],
     candle_verdict: result?.candle_verdict ?? null,
     measurements: result?.measurements ?? null,
-    reasoning: result?.reasoning ?? "",
+    // V2.1 fields — flow through cleanly even if the model omitted them
+    sequence_read: result?.sequence_read ?? null,
+    poi_confluence: result?.poi_confluence ?? null,
+    competition: result?.competition ?? null,
+    trade_plan: result?.trade_plan ?? null,
+    reasoning_block: rb,
+    reasoning: legacyReasoning,
     image: imagePath,
     captured_at: capturedAt.toISOString(),
     cost_usd: totalCost,
@@ -1380,25 +1638,51 @@ function loadV2Rubrics(opts = {}) {
   };
 }
 
-// Derives confluence grade by stacking verdicts across 3 TFs.
+// Derives confluence grade by stacking verdicts across 3 TFs. V2.1 raises the
+// bar with POI confluence + RR requirements:
 //   A+  — all 3 bias-aligned, monthly in 9-15 zone, weekly score >= 8,
-//         daily state = ENTER with sweep/pattern trigger
-//   A   — all 3 bias-aligned, weekly score >= 8, daily state = ENTER
-//   B   — all 3 bias-aligned, daily state = ENTER
+//         daily state = ENTER with sweep_displacement|sweep|pattern trigger,
+//         poi_confluence.count >= 2, rr_ratio >= MIN_RR_FOR_A_PLUS
+//   A   — all 3 bias-aligned, weekly score >= 8, daily state = ENTER,
+//         poi_confluence.count >= 1, rr_ratio >= MIN_RR_FOR_A
+//   B   — all 3 bias-aligned, daily state = ENTER, rr_ratio >= MIN_ENTER_RR
 //   C   — monthly + weekly aligned, daily state = WATCH
 //   —   — anything else
+//
+// When trade_plan / poi_confluence are absent (legacy cells from scans run
+// before V2.1) the gates default to "satisfied" so the legacy grading still
+// works — we don't want to silently downgrade old cached results.
 export function deriveConfluence(monthly, weekly, daily) {
   if (!monthly || !weekly || !daily) return "—";
   if (monthly.direction === "none" || weekly.direction === "none") return "—";
   if (weekly.direction !== monthly.direction) return "—";
   if (daily.direction_conflict) return "—";
 
+  const rr = daily.trade_plan?.rr_ratio;
+  const hasRr = typeof rr === "number";
+  const poiCount = daily.poi_confluence?.count;
+  const hasPoi = typeof poiCount === "number";
+
   if (daily.state === "ENTER") {
-    const sweepOrPattern =
-      daily.trigger_type === "sweep" || daily.trigger_type === "pattern";
-    if (monthly.in_9_15_zone && (weekly.score ?? 0) >= 8 && sweepOrPattern)
-      return "A+";
-    if ((weekly.score ?? 0) >= 8) return "A";
+    const highConvictionTrigger =
+      daily.trigger_type === "sweep_displacement" ||
+      daily.trigger_type === "sweep" ||
+      daily.trigger_type === "pattern";
+
+    const aPlusPoi = !hasPoi || poiCount >= 2;
+    const aPlusRr = !hasRr || rr >= MIN_RR_FOR_A_PLUS;
+    if (
+      monthly.in_9_15_zone &&
+      (weekly.score ?? 0) >= 8 &&
+      highConvictionTrigger &&
+      aPlusPoi &&
+      aPlusRr
+    ) return "A+";
+
+    const aPoi = !hasPoi || poiCount >= 1;
+    const aRr = !hasRr || rr >= MIN_RR_FOR_A;
+    if ((weekly.score ?? 0) >= 8 && aPoi && aRr) return "A";
+
     return "B";
   }
   if (daily.state === "WATCH") return "C";
@@ -1629,7 +1913,12 @@ function v2SummaryLine(r) {
   const state = r.daily?.state ?? "?";
   const trig = r.daily?.trigger_type ?? "—";
   const zone = r.monthly?.in_9_15_zone ? "  [9-15 zone]" : "";
-  return `  ${r.symbol.padEnd(12)} ${dirTag}  ${state}  trigger=${trig}  grade=${r.confluence_grade}${zone}`;
+  // V2.1 — surface RR and POI confluence in the one-line report.
+  const rr = r.daily?.trade_plan?.rr_ratio;
+  const rrTag = typeof rr === "number" ? `  RR=${rr.toFixed(1)}` : "";
+  const poiCount = r.daily?.poi_confluence?.count;
+  const poiTag = typeof poiCount === "number" ? `  POI=${poiCount}/4` : "";
+  return `  ${r.symbol.padEnd(12)} ${dirTag}  ${state}  trigger=${trig}  grade=${r.confluence_grade}${rrTag}${poiTag}${zone}`;
 }
 
 export async function runDeepScan(symbolLabel, tvSymbol, options = {}) {
@@ -1868,24 +2157,50 @@ export async function runScanV2(options = {}) {
     await closeTvClient(client);
   }
 
+  // V2.1 — correlation/cluster dedupe: keep top 2 per (cluster, direction).
+  // Mutates each result with `cluster_decision`. Pure pass — no I/O.
+  const dedupedResults = clusterDedupe(results, { keep: 2 });
+  // Re-assign so downstream (results array passed back to caller) sees the
+  // annotated copy. Splice-in-place to preserve the array identity.
+  results.length = 0;
+  results.push(...dedupedResults);
+
   console.log("\n═══════════════════════════════════════════════════════════");
   console.log("  Report Card");
   console.log("═══════════════════════════════════════════════════════════");
   for (const r of results) console.log(v2SummaryLine(r));
 
-  // Aggregate ENTER+WATCH candidates ranked by confluence grade
+  // Aggregate ENTER+WATCH candidates ranked by confluence grade. Cluster-
+  // demoted candidates are listed separately so nothing is silently dropped.
   const gradeOrder = { "A+": 0, A: 1, B: 2, C: 3, "—": 4 };
-  const candidates = results
+  const allCandidates = results
     .filter((r) => r.confluence_grade !== "—")
     .sort(
       (a, b) => gradeOrder[a.confluence_grade] - gradeOrder[b.confluence_grade],
     );
+  const candidates = allCandidates.filter(
+    (r) => r.cluster_decision?.kept !== false,
+  );
+  const clusteredOut = allCandidates.filter(
+    (r) => r.cluster_decision?.kept === false,
+  );
 
   if (candidates.length === 0) {
     console.log("\n  No candidates this scan.");
   } else {
     console.log("\n  Candidates (ranked by confluence grade):");
     for (const r of candidates) console.log(`    ${v2SummaryLine(r).trim()}`);
+  }
+  if (clusteredOut.length > 0) {
+    console.log(
+      `\n  Cluster-demoted (${clusteredOut.length}) — duplicates of higher-grade candidates in the same cluster + direction:`,
+    );
+    for (const r of clusteredOut) {
+      const cd = r.cluster_decision;
+      console.log(
+        `    ${v2SummaryLine(r).trim()}   [${cd.dominant_cluster ?? "?"} full]`,
+      );
+    }
   }
 
   const totalCost = results.reduce((sum, r) => sum + (r.cost_usd ?? 0), 0);

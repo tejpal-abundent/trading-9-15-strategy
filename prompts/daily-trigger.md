@@ -21,8 +21,10 @@ Grade what HAS happened on the most recent CLOSED candle. Never enter on predict
 ## Bias context
 
 - Monthly bias: **{MONTHLY_BIAS}**
+- Monthly move maturity: **{MONTHLY_MOVE_MATURITY}**
 - Weekly bias: **{WEEKLY_BIAS}** (score {WEEKLY_SCORE}/10)
 - Weekly pullback present: {WEEKLY_PULLBACK_PRESENT}
+- Weekly POI levels (V2.1): {WEEKLY_POI_LIST}
 
 You are ONLY looking for a **{WEEKLY_BIAS}** entry trigger on the daily chart.
 
@@ -52,7 +54,9 @@ Locate the rightmost candle on the chart — that's the current/forming bar. The
     "lower_wick_pct": 0,
     "close_position": "at_high" | "upper_third" | "mid" | "lower_third" | "at_low",
     "high_vs_prior_bar_high": "above" | "equal" | "below",
-    "low_vs_prior_bar_low": "above" | "equal" | "below"
+    "low_vs_prior_bar_low": "above" | "equal" | "below",
+    "body_atr_mult": 0.0,
+    "range_atr_mult": 0.0
   },
   "forming_bar": {
     "color": "green" | "red" | "doji",
@@ -62,14 +66,36 @@ Locate the rightmost candle on the chart — that's the current/forming bar. The
     "ema9_above_ema15": bool,
     "ema9_ema15_distance": "tight" | "normal" | "wide",
     "slope_direction": "up" | "down" | "flat",
-    "slope_steepness": "shallow" | "medium" | "steep"
+    "slope_steepness": "shallow" | "medium" | "steep",
+    "atr14_visible": 0.0
   },
   "recent_5_bars": {
     "direction": "up" | "down" | "mixed",
     "overlap_pct": 0
-  }
+  },
+  "last_5_candles": [
+    {
+      "index": -4,
+      "color": "green" | "red",
+      "body_pct_of_range": 0,
+      "upper_wick_pct": 0,
+      "lower_wick_pct": 0,
+      "close_position": "at_high" | "upper_third" | "mid" | "lower_third" | "at_low",
+      "high_vs_prior_bar_high": "above" | "equal" | "below",
+      "low_vs_prior_bar_low": "above" | "equal" | "below",
+      "body_atr_mult": 0.0,
+      "role": "driver" | "pause" | "pullback" | "sweep" | "rejection" | "absorption" | "continuation" | "reversal" | "inside",
+      "pattern": "solid_bull" | "solid_bear" | "hammer" | "shooting_star" | "engulfing_bull" | "engulfing_bear" | "inside_bar" | "pinbar_bull" | "pinbar_bear" | "doji" | "none",
+      "in_bias": bool
+    }
+    /* exactly 5 entries, indices -4 → 0, where 0 is the most recent CLOSED candle */
+  ]
 }
 ```
+
+**ATR + last_5_candles notes (V2.1):**
+- `body_atr_mult` = body height / `atr14_visible` (your eye-estimate of an average true-range bar over the last ~14 daily bars). `range_atr_mult` = total candle range / `atr14_visible`.
+- `last_5_candles` is the explicit 5-bar narrative. `index = 0` is the same bar as `current_closed_bar` (numbers must agree). `index = -1` is the same bar as `prior_bar` for color/body. Each bar's `role` MUST be backed by its own measurements (a "sweep" bar must have wicked beyond the prior bar's high/low; a "driver" bar must have body ≥ 50% AND `body_atr_mult ≥ 0.6`; an "inside" bar must satisfy high < prior high AND low > prior low). The downstream validator drops unbacked roles.
 
 ## Pass 2 — Gated verdicts
 
@@ -93,7 +119,7 @@ Read the rightmost CLOSED candle. Each candle_verdict subfield is gated:
 - `winner = "sellers"` symmetric
 - `winner = "mixed"` for body < 40 OR doji-shape candles
 - `winner_strength` (0-10) — derived from body and close position (matching the bar's winner):
-  - **8-10** if `body_pct_of_range ≥ 60` AND `close_position ∈ {"at_high", "at_low"}` (decisive close at extreme)
+  - **8-10** if `body_pct_of_range ≥ 60` AND `close_position ∈ {"at_high", "at_low"}` AND `body_atr_mult ≥ 0.8` (V2.1 — decisive close at extreme on a real expansion bar)
   - **5-7** if `body_pct_of_range ≥ 40` AND `close_position ∈ {"upper_third", "lower_third", "at_high", "at_low"}` (and not already in 8-10)
   - **0-4** otherwise (small body OR close in mid)
 - `liquidity_swept = "above_prior_high"` ONLY IF `current_closed_bar.high_vs_prior_bar_high = "above"` AND `close_position ∈ {"lower_third", "at_low"}` AND `color = "red"`
@@ -101,8 +127,8 @@ Read the rightmost CLOSED candle. Each candle_verdict subfield is gated:
 - `liquidity_swept = "none"` otherwise
 - `in_bias = true` ONLY IF `current_closed_bar.color matches {WEEKLY_BIAS}` AND `body_pct_of_range ≥ 40`
 - `pattern` — choose from the enum based on observed shape:
-  - `solid_bull` ONLY IF green AND `body_pct_of_range ≥ 60` AND `close_position ∈ {"upper_third", "at_high"}`
-  - `solid_bear` ONLY IF red AND `body_pct_of_range ≥ 60` AND `close_position ∈ {"lower_third", "at_low"}`
+  - `solid_bull` ONLY IF green AND `body_pct_of_range ≥ 60` AND `close_position ∈ {"upper_third", "at_high"}` AND `body_atr_mult ≥ 0.6` (V2.1)
+  - `solid_bear` ONLY IF red AND `body_pct_of_range ≥ 60` AND `close_position ∈ {"lower_third", "at_low"}` AND `body_atr_mult ≥ 0.6` (V2.1)
   - `hammer` / `pinbar_bull` ONLY IF green AND `lower_wick_pct ≥ 50` AND `body_pct_of_range ≤ 30`
   - `shooting_star` / `pinbar_bear` ONLY IF red AND `upper_wick_pct ≥ 50` AND `body_pct_of_range ≤ 30`
   - `engulfing_bull` ONLY IF green AND `prior_bar.color = "red"` AND `body_pct_of_range ≥ 60` AND `current_closed_bar.high_vs_prior_bar_high = "above"` AND `current_closed_bar.low_vs_prior_bar_low = "below"`
@@ -110,6 +136,81 @@ Read the rightmost CLOSED candle. Each candle_verdict subfield is gated:
   - `inside_bar` ONLY IF `current_closed_bar.high_vs_prior_bar_high = "below"` AND `current_closed_bar.low_vs_prior_bar_low = "above"`
   - `doji` ONLY IF `body_pct_of_range ≤ 10`
   - `none` if no rule above matches
+
+### Step 2b — Sequence read (V2.1 — narrative of the last 5 closed daily candles)
+
+Read the `last_5_candles` array as a *story* and grade how the sequence supports the trigger candle. A textbook reversal sequence might be: `pause → sweep → rejection → driver → continuation`. A textbook continuation: `pullback → pullback → pause → driver → continuation`.
+
+```json
+"sequence_read": {
+  "sequence_quality": 0,             // 0-10: how cleanly the bars line up to support the trigger
+  "sequence_label": "≤80 chars naming the pattern, e.g. 'sweep+rejection+driver'",
+  "last_5_in_bias_count": 0,         // 0-5, sum of last_5_candles[*].in_bias
+  "sequence_supports_trigger": bool, // true ONLY IF the trigger bar (index 0) is the natural conclusion of the prior 4
+  "sequence_notes": "≤2 sentences naming each bar's role in order"
+}
+```
+
+`sequence_supports_trigger` MUST be false if the trigger candle's role contradicts the rest (e.g. an "absorption" trigger after 3 driver bars = no expansion = not a tradeable confirmation).
+
+### Step 2c — POI confluence (V2.1 — points of interest the trigger candle is reacting to)
+
+For each level below, set true ONLY IF the **trigger bar's range overlaps that level** (a wick into the level counts; price merely "near" the level does NOT). The downstream `deriveConfluence` uses the count: A+ requires ≥ 2, A requires ≥ 1.
+
+```json
+"poi_confluence": {
+  "at_ema9_15_band": bool,           // trigger bar wicked or closed into the EMA9-EMA15 band
+  "at_prior_daily_swing": bool,      // wicked into a visible prior daily swing high (short bias) or swing low (long bias)
+  "at_prior_day_high_low": bool,     // wicked into yesterday's high or low (PDH / PDL)
+  "at_weekly_poi": bool,             // wicked into ANY level listed in {WEEKLY_POI_LIST}
+  "count": 0,                        // sum of the 4 booleans above (0-4)
+  "primary_poi_description": "≤120 chars naming the strongest level the bar reacted to"
+}
+```
+
+### Step 2d — Buyer/seller competition at the level (V2.1)
+
+This is the heart of reactive reading. At a real reversal you see **absorption** (multiple bars with long wicks both sides at one level), then a **sweep** of liquidity, then **displacement** (a fully in-bias body that closes back through the swept level). Reading these explicitly stops the system from confusing a lone sweep (which is often a trap) with the actual trade.
+
+```json
+"competition": {
+  "absorption_at_level": bool,
+     // ≥ 3 of last_5_candles share a horizontal level (their highs/lows cluster within ~0.3 ATR)
+     // AND each has body_pct_of_range ≤ 40 AND combined upper+lower wick ≥ 50%.
+  "sweep_then_displacement": bool,
+     // last_5_candles[-2].role === "sweep" (or candle_verdict.liquidity_swept ≠ "none" on bar -1)
+     // AND the trigger bar (index 0) is in_bias AND body_atr_mult ≥ 0.6 AND closes back inside the swept range.
+  "acceptance": "above" | "below" | "rejected" | "none",
+     // "above" / "below": close held on the in-bias side of the swept level for ≥ 2 bars (acceptance).
+     // "rejected": wicked through and reverted within 1 bar (rejection — the OPPOSITE of acceptance).
+     // "none": nothing was swept.
+  "competition_winner": "buyers" | "sellers" | "balance",
+  "notes": "≤2 sentences naming the level + who took it"
+}
+```
+
+### Step 2e — Trade plan (V2.1 — invalidation, target, R:R)
+
+A swing trade is only worth taking if R:R ≥ 2. Read levels off the chart — your eye-estimate is good enough; what matters is consistency between `entry_price_approx`, `invalidation_level`, `target_level`, and the ATR-normalised risk/reward.
+
+```json
+"trade_plan": {
+  "entry_price_approx": 0.0,
+  "invalidation_level": 0.0,
+     // long: below trigger candle low, OR below swept low − 0.25 ATR if sweep_then_displacement.
+     // short: symmetric (above trigger candle high / swept high + 0.25 ATR).
+  "invalidation_basis": "trigger_low" | "trigger_high" | "swept_low" | "swept_high" | "swing_low" | "swing_high" | "ema_band" | "other",
+  "target_level": 0.0,
+     // long: nearest visible prior swing high / weekly POI above / 1.272 extension of the prior leg.
+     // short: symmetric.
+  "target_basis": "prior_swing_high" | "prior_swing_low" | "weekly_poi" | "monthly_swing" | "1.272_ext" | "round_number" | "other",
+  "risk_atr": 0.0,    // |entry − invalidation| / atr14_visible
+  "reward_atr": 0.0,  // |target − entry|       / atr14_visible
+  "rr_ratio": 0.0     // reward_atr / risk_atr  (must be > 0; downstream forces ENTER → WATCH if < 2.0)
+}
+```
+
+If you genuinely cannot read levels off the chart (e.g. the visible window is too zoomed in), return `null` for the whole `trade_plan` object — the downstream code will treat that as "RR unknown" and fall back to legacy gating, which is safer than a fabricated number.
 
 ### Step 3 — Red flags
 
@@ -142,7 +243,9 @@ If the daily structure is clearly broken against {WEEKLY_BIAS} (EMAs visibly fli
       "lower_wick_pct": 0,
       "close_position": "at_high" | "upper_third" | "mid" | "lower_third" | "at_low",
       "high_vs_prior_bar_high": "above" | "equal" | "below",
-      "low_vs_prior_bar_low": "above" | "equal" | "below"
+      "low_vs_prior_bar_low": "above" | "equal" | "below",
+      "body_atr_mult": 0.0,
+      "range_atr_mult": 0.0
     },
     "forming_bar": {
       "color": "green" | "red" | "doji",
@@ -152,12 +255,29 @@ If the daily structure is clearly broken against {WEEKLY_BIAS} (EMAs visibly fli
       "ema9_above_ema15": bool,
       "ema9_ema15_distance": "tight" | "normal" | "wide",
       "slope_direction": "up" | "down" | "flat",
-      "slope_steepness": "shallow" | "medium" | "steep"
+      "slope_steepness": "shallow" | "medium" | "steep",
+      "atr14_visible": 0.0
     },
     "recent_5_bars": {
       "direction": "up" | "down" | "mixed",
       "overlap_pct": 0
-    }
+    },
+    "last_5_candles": [
+      {
+        "index": -4,
+        "color": "green" | "red",
+        "body_pct_of_range": 0,
+        "upper_wick_pct": 0,
+        "lower_wick_pct": 0,
+        "close_position": "at_high" | "upper_third" | "mid" | "lower_third" | "at_low",
+        "high_vs_prior_bar_high": "above" | "equal" | "below",
+        "low_vs_prior_bar_low": "above" | "equal" | "below",
+        "body_atr_mult": 0.0,
+        "role": "driver" | "pause" | "pullback" | "sweep" | "rejection" | "absorption" | "continuation" | "reversal" | "inside",
+        "pattern": "solid_bull" | "solid_bear" | "hammer" | "shooting_star" | "engulfing_bull" | "engulfing_bear" | "inside_bar" | "pinbar_bull" | "pinbar_bear" | "doji" | "none",
+        "in_bias": bool
+      }
+    ]
   },
   "direction_conflict": bool,
   "setup_type": "pullback" | "continuation" | "none",
@@ -181,9 +301,48 @@ If the daily structure is clearly broken against {WEEKLY_BIAS} (EMAs visibly fli
     "in_bias": bool,
     "verdict": "one sentence"
   },
+  "sequence_read": {
+    "sequence_quality": 0,
+    "sequence_label": "≤80 chars",
+    "last_5_in_bias_count": 0,
+    "sequence_supports_trigger": bool,
+    "sequence_notes": "≤2 sentences"
+  },
+  "poi_confluence": {
+    "at_ema9_15_band": bool,
+    "at_prior_daily_swing": bool,
+    "at_prior_day_high_low": bool,
+    "at_weekly_poi": bool,
+    "count": 0,
+    "primary_poi_description": "≤120 chars"
+  },
+  "competition": {
+    "absorption_at_level": bool,
+    "sweep_then_displacement": bool,
+    "acceptance": "above" | "below" | "rejected" | "none",
+    "competition_winner": "buyers" | "sellers" | "balance",
+    "notes": "≤2 sentences"
+  },
+  "trade_plan": {
+    "entry_price_approx": 0.0,
+    "invalidation_level": 0.0,
+    "invalidation_basis": "trigger_low" | "trigger_high" | "swept_low" | "swept_high" | "swing_low" | "swing_high" | "ema_band" | "other",
+    "target_level": 0.0,
+    "target_basis": "prior_swing_high" | "prior_swing_low" | "weekly_poi" | "monthly_swing" | "1.272_ext" | "round_number" | "other",
+    "risk_atr": 0.0,
+    "reward_atr": 0.0,
+    "rr_ratio": 0.0
+  },
   "state": "NONE" | "WATCH" | "ENTER",
-  "trigger_type": "momentum" | "sweep" | "pattern" | "none",
-  "reasoning": "one sentence ≤ 200 chars"
+  "trigger_type": "momentum" | "sweep" | "pattern" | "sweep_displacement" | "none",
+  "reasoning_block": {
+    "htf_context":     "≤2 sentences — monthly + weekly bias and what stage the move is in",
+    "sequence_read":   "≤2 sentences — what the last 5 daily bars did, named in order",
+    "trigger_anatomy": "≤2 sentences — the trigger candle decomposed: body, wicks, close, pattern",
+    "competition":     "≤2 sentences — who won at the POI: absorption / sweep+displacement / acceptance",
+    "plan":            "≤2 sentences — entry ~X, invalidation Y (basis), target Z (basis), RR=W"
+  },
+  "reasoning": "one sentence ≤ 200 chars (kept for backwards compatibility — derived from reasoning_block.plan)"
 }
 ```
 

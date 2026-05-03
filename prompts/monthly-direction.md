@@ -95,6 +95,25 @@ Examine the rightmost CLOSED candle (not the forming one if still incomplete):
 10. **in_bias** — true if `winner` matches `direction`; false otherwise (always false when direction === "none")
 11. **verdict** — one sentence: who won this bar and how
 
+### Step 4 — Move maturity (V2.1 — gate against late-stage entries)
+
+Classify how far along the current monthly leg is. The downstream daily evaluator uses this to refuse pure-momentum entries when the monthly is `late` or `exhausted` — those are the highest-loss spots in swing trading because mean-reversion is overdue.
+
+- **`early`** — fresh EMA9/15 stack flip in the last 1-3 monthly bars; trend just born.
+- **`mid`** — 4-12 monthly bars of clean trend, EMAs widening, no major upper/lower wick rejections at the extreme.
+- **`late`** — ≥ 12 monthly bars of trend, EMAs flat-widening (decelerating), 2+ rejection wicks at recent extremes.
+- **`exhausted`** — parabolic (near-vertical EMA9 slope) AND multi-bar wick rejections at the extreme; mean reversion imminent.
+
+Use `direction = "none"` → `move_maturity = "early"` as a safe default (no trend = no maturity to read).
+
+### Step 5 — Reasoning block (V2.1 — replace the 1-sentence reasoning)
+
+Each field ≤ 2 sentences. Each must be grounded in a Pass-1 measurement or Pass-2 verdict above.
+
+- **`context`** — what the monthly EMA stack + slope is telling you about regime.
+- **`maturity_read`** — why you chose `early` / `mid` / `late` / `exhausted`, naming the specific bars or wicks that drove it.
+- **`candle_anatomy`** — the most recent closed monthly candle decomposed: body, wicks, close position, who won and how decisively.
+
 ### Output format
 
 ```json
@@ -102,6 +121,7 @@ Examine the rightmost CLOSED candle (not the forming one if still incomplete):
   "measurements": { ... full Pass-1 schema above ... },
   "direction": "long" | "short" | "none",
   "in_9_15_zone": bool,
+  "move_maturity": "early" | "mid" | "late" | "exhausted",
   "candle_verdict": {
     "body_type": "solid" | "normal" | "doji" | "highwave",
     "body_pct_of_range": 0,
@@ -115,6 +135,11 @@ Examine the rightmost CLOSED candle (not the forming one if still incomplete):
     "in_bias": bool,
     "verdict": "one sentence"
   },
-  "reasoning": "one sentence naming the direction and strongest supporting evidence"
+  "reasoning_block": {
+    "context": "≤2 sentences",
+    "maturity_read": "≤2 sentences",
+    "candle_anatomy": "≤2 sentences"
+  },
+  "reasoning": "one sentence naming the direction and strongest supporting evidence (kept for backwards compatibility — derived from reasoning_block.context)"
 }
 ```

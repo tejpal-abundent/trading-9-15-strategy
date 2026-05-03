@@ -282,6 +282,12 @@ It does three things:
 If a flag's gate fails, the flag is dropped and a line is appended to
 `cell.consistency_log` for audit.
 
+Daily cells don't carry their own `direction` field — they inherit bias
+from the weekly. The validator accepts a `fallbackDirection` arg so the
+daily caller passes `weekly.direction`; without it, every direction-
+conditional gate above would short-circuit to "keep" on the no-bias
+branch and daily red flags would survive untested.
+
 ### 5.2 Validate `liquidity_swept` (`sweepGateSatisfied()`)
 
 | Claim                | Required measurements                                                                            |
@@ -360,11 +366,13 @@ assigns a grade:
 
 | Grade | Conditions                                                                                                        |
 | ----- | ----------------------------------------------------------------------------------------------------------------- |
-| **A+** | All 3 TFs bias-aligned, monthly `in_9_15_zone = true`, weekly `score ≥ 8`, daily `state = ENTER` AND `trigger_type ∈ {sweep, pattern}`. |
-| **A**  | All 3 TFs bias-aligned, weekly `score ≥ 8`, daily `state = ENTER`.                                                |
-| **B**  | All 3 TFs bias-aligned, daily `state = ENTER`.                                                                    |
+| **A+** | All 3 TFs bias-aligned, monthly `in_9_15_zone = true`, weekly `score ≥ 8`, daily `state = ENTER` AND `trigger_type ∈ {sweep_displacement, sweep, pattern}`, **V2.1**: `poi_confluence.count ≥ 2`, `trade_plan.rr_ratio ≥ 3.0`. |
+| **A**  | All 3 TFs bias-aligned, weekly `score ≥ 8`, daily `state = ENTER`, **V2.1**: `poi_confluence.count ≥ 1`, `trade_plan.rr_ratio ≥ 2.5`. |
+| **B**  | All 3 TFs bias-aligned, daily `state = ENTER`, **V2.1**: `trade_plan.rr_ratio ≥ 2.0` (otherwise dailyCellState already downgraded ENTER → WATCH). |
 | **C**  | Monthly + weekly aligned, daily `state = WATCH`.                                                                  |
 | **—**  | Anything else (any stop condition, any direction conflict).                                                       |
+
+**V2.1 RR / POI legacy fall-through.** When `trade_plan` or `poi_confluence` is `null` (model couldn't read levels off the chart, or scan was run before V2.1) the corresponding gate defaults to "satisfied" — so old cached scans grade exactly as they used to.
 
 The daily report sorts ENTER + WATCH candidates by this grade; STOPs are
 listed separately on the report card with their `stop_reason`.
@@ -459,7 +467,146 @@ The console report card has one line per symbol:
 
 Read it as `<symbol> STOP @ <last TF reached> (<stop_reason>)`. Anything
 that didn't STOP is a candidate and is also listed under "Candidates"
-sorted by confluence grade. The full per-cell JSON (Pass-1 measurements,
-gated verdicts, consistency log,
-red_flag_classification, setup_match, candle_strong_in_bias) is saved to
+sorted by confluence grade. V2.1 adds `RR=X.X` and `POI=N/4` tags to the
+candidate line, plus a separate "Cluster-demoted" section for correlated
+duplicates (see §18). The full per-cell JSON (Pass-1 measurements, gated
+verdicts, consistency log, red_flag_classification, setup_match,
+candle_strong_in_bias, last_5_candles, sequence_read, poi_confluence,
+competition, trade_plan, reasoning_block, cluster_decision) is saved to
 `scan-results/scan-v2-watchlist-<timestamp>.json` for later auditing.
+
+---
+
+## 14. V2.1 — Multi-bar narrative read on the daily
+
+The single biggest change in V2.1 is that the daily evaluator stops reading **one** closed candle in isolation and starts reading the **last 5 daily candles as a sequence**.
+
+Pass-1 measurements now include `last_5_candles[]` — five objects (indices `-4` through `0`, where `0 == current_closed_bar`), each tagged with:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `color`, `body_pct_of_range`, `upper_wick_pct`, `lower_wick_pct`, `close_position` | numeric / enum | per-bar shape |
+| `high_vs_prior_bar_high`, `low_vs_prior_bar_low` | enum | for sweep / inside detection |
+| `body_atr_mult` | float | body height / `ema_state.atr14_visible` |
+| `role` | enum | `driver` / `pause` / `pullback` / `sweep` / `rejection` / `absorption` / `continuation` / `reversal` / `inside` |
+| `pattern` | enum | reuses the 12-value candle pattern enum |
+
+Pass 2 then exposes a `sequence_read` block (`sequence_quality 0-10`, `sequence_label`, `last_5_in_bias_count`, `sequence_supports_trigger`, `sequence_notes`).
+
+`validateCellConsistency` drops any per-bar `role` whose own measurements directly contradict it (`roleGateSatisfied` in `src/scanner.js`). Examples that get dropped:
+- `role = "sweep"` on a bar that didn't actually wick beyond the prior bar's high or low.
+- `role = "driver"` on a bar with `body_pct_of_range < 50` or `body_atr_mult < 0.6`.
+- `role = "inside"` on a bar that is not actually inside the prior bar's range.
+
+A failed role is downgraded to `pause` (safe neutral) and logged to `cell.consistency_log`.
+
+---
+
+## 15. V2.1 — POI confluence
+
+The original strategy used **one** point of interest: the EMA9–15 band. V2.1 adds three more, scored as a count.
+
+### Weekly POI declaration
+
+`prompts/weekly-structure.md` Pass 2 now returns a `weekly_poi[]` array (≤ 3 items). Each entry: `{ kind, level_description, distance_to_current_close_atr }` where `kind ∈ {swing_high, swing_low, breaker, order_block, prior_range_extreme}`. The list is flattened into a single line by `formatWeeklyPoiList()` (`src/scanner.js`) and injected into the daily prompt via the `{WEEKLY_POI_LIST}` placeholder.
+
+### Daily POI confluence count
+
+`prompts/daily-trigger.md` Pass 2 now returns a `poi_confluence` block:
+
+```
+{ at_ema9_15_band, at_prior_daily_swing, at_prior_day_high_low, at_weekly_poi, count, primary_poi_description }
+```
+
+Each boolean is set true ONLY IF the trigger bar's range overlaps that level (a wick into the level counts).
+
+### Grade boost
+
+`deriveConfluence` (`src/scanner.js`) now requires:
+- **A+**: `poi_confluence.count >= 2`
+- **A**: `poi_confluence.count >= 1`
+- **B**: any (no POI requirement — the daily ENTER is enough)
+
+When the field is absent (legacy cells) the gates default to "satisfied" so old cached scans are not retroactively downgraded.
+
+---
+
+## 16. V2.1 — Buyer/seller competition + RR gate
+
+### Competition block
+
+`prompts/daily-trigger.md` Pass 2 now returns a `competition` block — the explicit reactive read of who took the level:
+
+```
+{ absorption_at_level, sweep_then_displacement, acceptance, competition_winner, notes }
+```
+
+`acceptance ∈ {above, below, rejected, none}` distinguishes a sweep that was accepted (close held on the in-bias side ≥ 2 bars) from a sweep that was rejected (wicked through and reverted within 1 bar — the OPPOSITE of acceptance, and the actual reversal signal).
+
+`sweep_then_displacement` is the highest-conviction trigger tier: prior bar swept liquidity AND the trigger bar fully displaced back through the level (in-bias body, `body_atr_mult ≥ 0.6`). `dailyTriggerType` now exposes a new tier — `sweep_displacement` — above the existing `sweep`.
+
+`validateCellConsistency` enforces both gates:
+- Drops `competition.sweep_then_displacement = true` if (a) `last_5_candles[-2].role !== "sweep"`, OR (b) the trigger bar's `body_atr_mult < 0.6`.
+- Drops `solid_bull` / `solid_bear` patterns and clamps `winner_strength` from 8-10 down to 5 when `body_atr_mult < 0.8` (`STRONG_WINNER_BODY_ATR_MIN`).
+
+### Trade plan + RR gate
+
+Daily Pass 2 also returns a `trade_plan` block:
+
+```
+{ entry_price_approx, invalidation_level, invalidation_basis,
+  target_level, target_basis, risk_atr, reward_atr, rr_ratio }
+```
+
+`dailyCellState` (`src/scanner.js`) downgrades ENTER → WATCH when `trade_plan.rr_ratio < MIN_ENTER_RR (= 2.0)`. `deriveConfluence` raises the bar at the grade boundaries:
+
+| Grade | RR floor |
+|-------|----------|
+| A+    | ≥ 3.0 (`MIN_RR_FOR_A_PLUS`) |
+| A     | ≥ 2.5 (`MIN_RR_FOR_A`) |
+| B     | ≥ 2.0 (`MIN_ENTER_RR`) |
+| C     | (none — WATCH only)    |
+
+`validateCellConsistency` recomputes `rr_ratio` from `reward_atr / risk_atr` if the model's reported value drifts > 10% from the computed one, and strips `rr_ratio` entirely if `risk_atr` is not > 0 (legacy fall-through path).
+
+When `trade_plan` is `null` (model genuinely couldn't read levels off the chart, e.g. the visible window is too zoomed in) the RR gates default to "pass" so the cascade still works on legacy / measurement-poor cells.
+
+---
+
+## 17. V2.1 — Move-maturity classifier + late-trend trap guard
+
+`prompts/monthly-direction.md` Pass 2 now returns `move_maturity ∈ {early, mid, late, exhausted}`:
+
+| Maturity | Definition |
+|----------|------------|
+| `early` | EMA9/15 stack flipped within the last 1-3 monthly bars. |
+| `mid` | 4-12 monthly bars of clean trend, EMAs widening. |
+| `late` | ≥ 12 bars, EMAs flat-widening, multiple wicks at extremes. |
+| `exhausted` | Parabolic + multi-wick rejections at the extreme. |
+
+`dailyCellState` consults this when the trigger type would otherwise be `momentum`: when `monthly.move_maturity ∈ {late, exhausted}` AND `dailyTriggerType === "momentum"`, the cell is downgraded ENTER → WATCH. (Sweep / pattern / sweep_displacement are NOT downgraded — those ARE the reversal triggers worth taking at extension.)
+
+---
+
+## 18. V2.1 — Cluster dedupe (correlation cap)
+
+`src/clusters.js` defines cluster maps for FX (currency-leg-based: EURUSD belongs to both `fx_EUR` and `fx_USD`), crypto (hand-curated: `crypto_majors`, `crypto_l1_alts`, `crypto_l2`, `crypto_defi`, `crypto_memes`), and indices/commodities (`idx_us_indices`, `idx_global_indices`, `idx_energy`, `idx_precious_metals`).
+
+After `runScanV2` collects all results, `clusterDedupe(results, { keep: 2 })` (called from `runScanV2` in `src/scanner.js`) groups ENTER/WATCH candidates by `(clusterId, direction)` and keeps only the top 2 per bucket (sorted by confluence grade, then RR ratio, then probability). Demoted candidates get `cluster_decision = { kept: false, dominant_cluster, reason }` attached — they still appear on the report card but in a separate "Cluster-demoted" section, so the human can override.
+
+---
+
+## 19. V2.1 — Structured reasoning block
+
+Every prompt's `reasoning` (one sentence ≤ 200 chars) is now augmented with a `reasoning_block` object:
+
+| Prompt | Block fields |
+|--------|--------------|
+| Monthly | `context`, `maturity_read`, `candle_anatomy` |
+| Weekly  | `context`, `structure_read`, `poi_read` |
+| Daily   | `htf_context`, `sequence_read`, `trigger_anatomy`, `competition`, `plan` |
+
+Each field is ≤ 2 sentences and must be grounded in a Pass-1 measurement or Pass-2 verdict. A 1-line legacy `reasoning` is auto-derived from `reasoning_block.plan` (daily) / `reasoning_block.context` (weekly/monthly) so the existing report fallback continues to work.
+
+The HTML email (`src/report.js`) renders the structured block as a stacked fact-table on every TF block of the candidate cards. The daily card additionally shows the `last_5_candles` mini-table, the `trade_plan` (entry / invalidation / target / RR), and the POI/competition summary.
+

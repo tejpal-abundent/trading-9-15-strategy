@@ -52,7 +52,9 @@ Locate the rightmost candle on the chart — this is the current/forming bar. Th
     "lower_wick_pct": 0,
     "close_position": "at_high" | "upper_third" | "mid" | "lower_third" | "at_low",
     "high_vs_prior_bar_high": "above" | "equal" | "below",
-    "low_vs_prior_bar_low": "above" | "equal" | "below"
+    "low_vs_prior_bar_low": "above" | "equal" | "below",
+    "body_atr_mult": 0.0,
+    "range_atr_mult": 0.0
   },
   "forming_bar": {
     "color": "green" | "red" | "doji",
@@ -62,7 +64,8 @@ Locate the rightmost candle on the chart — this is the current/forming bar. Th
     "ema9_above_ema15": bool,
     "ema9_ema15_distance": "tight" | "normal" | "wide",
     "slope_direction": "up" | "down" | "flat",
-    "slope_steepness": "shallow" | "medium" | "steep"
+    "slope_steepness": "shallow" | "medium" | "steep",
+    "atr14_visible": 0.0
   },
   "recent_5_bars": {
     "direction": "up" | "down" | "mixed",
@@ -70,6 +73,8 @@ Locate the rightmost candle on the chart — this is the current/forming bar. Th
   }
 }
 ```
+
+**ATR notes (V2.1):** `body_atr_mult` = body height / `atr14_visible` (your eye-estimate of an average true-range bar over the last ~14 weekly bars). `range_atr_mult` = total candle range / `atr14_visible`. These let downstream code distinguish a real expansion candle from a tight inside bar that happens to be 60% body. If the chart doesn't show enough history to estimate ATR, set `atr14_visible` to your best guess and `body_atr_mult` / `range_atr_mult` accordingly — never null.
 
 ## Pass 2 — Gated verdicts (each gate references Pass-1 fields)
 
@@ -115,6 +120,27 @@ Use the same 11 fields as defined in the output schema below. Each numeric field
 - `liquidity_swept = "above_prior_high"` ONLY IF `current_closed_bar.high_vs_prior_bar_high = "above"` AND `close_position ∈ {"lower_third", "at_low"}` AND `color = "red"`
 - `liquidity_swept = "below_prior_low"` symmetric
 - `in_bias = true` ONLY IF `current_closed_bar.color matches direction` AND `body_pct_of_range ≥ 40`
+- `pattern = "solid_bull"` / `"solid_bear"` ALSO requires `body_atr_mult ≥ 0.6` (V2.1 — a 60%-body bar that's tiny vs ATR is not a "solid" candle).
+- `winner_strength` 8-10 ALSO requires `body_atr_mult ≥ 0.8`.
+
+### Step 5 — Weekly POI (V2.1 — Points of Interest the daily can confluence with)
+
+Identify up to 3 structural levels visible on this weekly chart that the daily evaluator can later test for confluence. Each entry describes a level — the model is reading a chart, so descriptions can be approximate ("most recent visible swing high around 1.0850") but must be grounded in what's actually on screen.
+
+Each item:
+- **`kind`** — one of `swing_high`, `swing_low`, `breaker`, `order_block`, `prior_range_extreme`.
+- **`level_description`** — ≤ 80 chars, e.g. "swing low from 8 weeks ago, around 1.0750".
+- **`distance_to_current_close_atr`** — eye-estimate distance from the rightmost CLOSED candle's close to the level, expressed in multiples of `ema_state.atr14_visible`. Negative = below current close, positive = above.
+
+If no clear POI is visible, return an empty array.
+
+### Step 6 — Reasoning block (V2.1 — replace the 1-sentence reasoning)
+
+Each field ≤ 2 sentences, each grounded in Pass-1 measurements or Pass-2 verdicts above.
+
+- **`context`** — monthly bias + weekly EMA stack/slope + setup_type in one read.
+- **`structure_read`** — what the structural gates say (angle_ok, pullback_present, ema_stack_ok, solid_continuation) and which (if any) failed.
+- **`poi_read`** — name the dominant POI level (or "no clear POI") and where price sits relative to it now.
 
 ### Output format
 
@@ -133,7 +159,9 @@ Use the same 11 fields as defined in the output schema below. Each numeric field
       "lower_wick_pct": 0,
       "close_position": "at_high" | "upper_third" | "mid" | "lower_third" | "at_low",
       "high_vs_prior_bar_high": "above" | "equal" | "below",
-      "low_vs_prior_bar_low": "above" | "equal" | "below"
+      "low_vs_prior_bar_low": "above" | "equal" | "below",
+      "body_atr_mult": 0.0,
+      "range_atr_mult": 0.0
     },
     "forming_bar": {
       "color": "green" | "red" | "doji",
@@ -143,7 +171,8 @@ Use the same 11 fields as defined in the output schema below. Each numeric field
       "ema9_above_ema15": bool,
       "ema9_ema15_distance": "tight" | "normal" | "wide",
       "slope_direction": "up" | "down" | "flat",
-      "slope_steepness": "shallow" | "medium" | "steep"
+      "slope_steepness": "shallow" | "medium" | "steep",
+      "atr14_visible": 0.0
     },
     "recent_5_bars": {
       "direction": "up" | "down" | "mixed",
@@ -173,7 +202,19 @@ Use the same 11 fields as defined in the output schema below. Each numeric field
     "in_bias": bool,
     "verdict": "one sentence"
   },
-  "reasoning": "one sentence ≤ 200 chars"
+  "weekly_poi": [
+    {
+      "kind": "swing_high" | "swing_low" | "breaker" | "order_block" | "prior_range_extreme",
+      "level_description": "≤ 80 chars",
+      "distance_to_current_close_atr": 0.0
+    }
+  ],
+  "reasoning_block": {
+    "context": "≤2 sentences",
+    "structure_read": "≤2 sentences",
+    "poi_read": "≤2 sentences"
+  },
+  "reasoning": "one sentence ≤ 200 chars (kept for backwards compatibility — derived from reasoning_block.structure_read)"
 }
 ```
 
