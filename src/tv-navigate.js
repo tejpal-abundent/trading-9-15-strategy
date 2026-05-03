@@ -39,38 +39,45 @@ export class ChartSymbolSwitchFailedError extends Error {
 // (e.g. "NASDAQ:AAPL") depending on TV state. Any of the listed tokens is
 // considered a match, case-insensitive substring. Used as the second AND
 // signal alongside exchange match in verifyRenderedMatchesExpected().
+// Each entry maps an expected TV symbol to an array of "patterns". Each pattern
+// is an array of substrings that must ALL appear (case-insensitive) in the
+// rendered legend description. The match passes if ANY pattern fully matches.
+// This handles TV's variations: pro_name format ("BINANCE:BTCUSDT"), short
+// form ("BTC/USDT"), and spelled-out ("Bitcoin / TetherUS", "Gold Spot / U.S.
+// Dollar"). Per-pattern ALL-must-match avoids false positives between pairs
+// that share a single currency (e.g. GBP/JPY vs GBP/USD).
 const SYMBOL_DESCRIPTION_TOKENS = {
   // Crypto (BINANCE)
-  "BINANCE:BTCUSDT": ["BTCUSDT", "Bitcoin"],
-  "BINANCE:ETHUSDT": ["ETHUSDT", "Ethereum"],
-  "BINANCE:SOLUSDT": ["SOLUSDT", "Solana"],
-  // Forex / metals (OANDA)
-  "OANDA:XAUUSD": ["XAUUSD", "XAU/USD", "Gold / U.S. Dollar"],
-  "OANDA:EURUSD": ["EURUSD", "EUR/USD", "Euro / U.S. Dollar"],
-  "OANDA:GBPUSD": ["GBPUSD", "GBP/USD", "British Pound / U.S. Dollar"],
-  "OANDA:USDJPY": ["USDJPY", "USD/JPY", "U.S. Dollar / Japanese Yen"],
-  "OANDA:USDCHF": ["USDCHF", "USD/CHF", "U.S. Dollar / Swiss Franc"],
-  "OANDA:AUDUSD": ["AUDUSD", "AUD/USD", "Australian Dollar / U.S. Dollar"],
-  "OANDA:USDCAD": ["USDCAD", "USD/CAD", "U.S. Dollar / Canadian Dollar"],
-  "OANDA:NZDUSD": ["NZDUSD", "NZD/USD", "New Zealand Dollar / U.S. Dollar"],
-  "OANDA:EURJPY": ["EURJPY", "EUR/JPY", "Euro / Japanese Yen"],
-  "OANDA:GBPJPY": ["GBPJPY", "GBP/JPY", "British Pound / Japanese Yen"],
-  "OANDA:GBPAUD": ["GBPAUD", "GBP/AUD", "British Pound / Australian Dollar"],
-  "OANDA:EURCHF": ["EURCHF", "EUR/CHF", "Euro / Swiss Franc"],
-  "OANDA:EURCAD": ["EURCAD", "EUR/CAD", "Euro / Canadian Dollar"],
-  "OANDA:EURGBP": ["EURGBP", "EUR/GBP", "Euro / British Pound"],
-  "OANDA:EURAUD": ["EURAUD", "EUR/AUD", "Euro / Australian Dollar"],
-  "OANDA:AUDJPY": ["AUDJPY", "AUD/JPY", "Australian Dollar / Japanese Yen"],
-  "OANDA:CHFJPY": ["CHFJPY", "CHF/JPY", "Swiss Franc / Japanese Yen"],
-  "OANDA:AUDNZD": ["AUDNZD", "AUD/NZD", "Australian Dollar / New Zealand Dollar"],
-  "OANDA:US30USD": ["US30", "Dow", "US Wall Street", "Wall Street"],
-  "OANDA:DE30EUR": ["DE30", "Germany", "DAX"],
-  "OANDA:HK33HKD": ["HK33", "Hong Kong", "Hang Seng"],
+  "BINANCE:BTCUSDT": [["BTCUSDT"], ["BTC", "USDT"], ["Bitcoin", "TetherUS"]],
+  "BINANCE:ETHUSDT": [["ETHUSDT"], ["ETH", "USDT"], ["Ethereum", "TetherUS"]],
+  "BINANCE:SOLUSDT": [["SOLUSDT"], ["SOL", "USDT"], ["SOL", "TetherUS"], ["Solana", "TetherUS"]],
+  // Forex / metals (OANDA) — TV often prefixes "Gold" with "Gold Spot"
+  "OANDA:XAUUSD": [["XAUUSD"], ["XAU", "USD"], ["Gold", "U.S. Dollar"]],
+  "OANDA:EURUSD": [["EURUSD"], ["EUR/USD"], ["Euro", "U.S. Dollar"]],
+  "OANDA:GBPUSD": [["GBPUSD"], ["GBP/USD"], ["British Pound", "U.S. Dollar"]],
+  "OANDA:USDJPY": [["USDJPY"], ["USD/JPY"], ["U.S. Dollar", "Japanese Yen"]],
+  "OANDA:USDCHF": [["USDCHF"], ["USD/CHF"], ["U.S. Dollar", "Swiss Franc"]],
+  "OANDA:AUDUSD": [["AUDUSD"], ["AUD/USD"], ["Australian Dollar", "U.S. Dollar"]],
+  "OANDA:USDCAD": [["USDCAD"], ["USD/CAD"], ["U.S. Dollar", "Canadian Dollar"]],
+  "OANDA:NZDUSD": [["NZDUSD"], ["NZD/USD"], ["New Zealand Dollar", "U.S. Dollar"]],
+  "OANDA:EURJPY": [["EURJPY"], ["EUR/JPY"], ["Euro", "Japanese Yen"]],
+  "OANDA:GBPJPY": [["GBPJPY"], ["GBP/JPY"], ["British Pound", "Japanese Yen"]],
+  "OANDA:GBPAUD": [["GBPAUD"], ["GBP/AUD"], ["British Pound", "Australian Dollar"]],
+  "OANDA:EURCHF": [["EURCHF"], ["EUR/CHF"], ["Euro", "Swiss Franc"]],
+  "OANDA:EURCAD": [["EURCAD"], ["EUR/CAD"], ["Euro", "Canadian Dollar"]],
+  "OANDA:EURGBP": [["EURGBP"], ["EUR/GBP"], ["Euro", "British Pound"]],
+  "OANDA:EURAUD": [["EURAUD"], ["EUR/AUD"], ["Euro", "Australian Dollar"]],
+  "OANDA:AUDJPY": [["AUDJPY"], ["AUD/JPY"], ["Australian Dollar", "Japanese Yen"]],
+  "OANDA:CHFJPY": [["CHFJPY"], ["CHF/JPY"], ["Swiss Franc", "Japanese Yen"]],
+  "OANDA:AUDNZD": [["AUDNZD"], ["AUD/NZD"], ["Australian Dollar", "New Zealand Dollar"]],
+  "OANDA:US30USD": [["US30"], ["Dow"], ["Wall Street"]],
+  "OANDA:DE30EUR": [["DE30"], ["DAX"], ["Germany"]],
+  "OANDA:HK33HKD": [["HK33"], ["Hang Seng"], ["Hong Kong"]],
   // Indices / commodities (TVC)
-  "TVC:USOIL": ["USOIL", "WTI", "CRUDE OIL", "Crude Oil"],
+  "TVC:USOIL": [["USOIL"], ["WTI"], ["Crude Oil"]],
   // Equities (NASDAQ — TV may render via BATS sibling listing)
-  "NASDAQ:TSLA": ["TSLA", "Tesla"],
-  "NASDAQ:AAPL": ["AAPL", "Apple"],
+  "NASDAQ:TSLA": [["TSLA"], ["Tesla"]],
+  "NASDAQ:AAPL": [["AAPL"], ["Apple"]],
 };
 
 // Exchange families. TV may report a sibling listing on a different exchange
@@ -335,16 +342,24 @@ export function verifyRenderedMatchesExpected(rendered, expectedTvSymbol) {
     }
   }
 
-  // Description / ticker check
+  // Description / ticker check. Patterns are arrays of arrays: each inner
+  // array is "all substrings must appear in description" — match passes if
+  // ANY inner array fully matches. Falls back to the bare ticker if the
+  // symbol isn't in the token table.
   const descUpper = (rendered.description || "").toUpperCase();
-  const tokens = SYMBOL_DESCRIPTION_TOKENS[expectedTvSymbol] || [
-    expectedTicker,
+  const patterns = SYMBOL_DESCRIPTION_TOKENS[expectedTvSymbol] || [
+    [expectedTicker],
   ];
-  const hit = tokens.some((tok) => descUpper.includes(tok.toUpperCase()));
+  const hit = patterns.some((pattern) =>
+    pattern.every((sub) => descUpper.includes(sub.toUpperCase())),
+  );
   if (!hit) {
+    const pretty = patterns
+      .map((p) => `[${p.join(" + ")}]`)
+      .join(" OR ");
     return {
       ok: false,
-      reason: `description_mismatch (expected one of [${tokens.join(", ")}], rendered="${rendered.description}")`,
+      reason: `description_mismatch (expected ${pretty}, rendered="${rendered.description}")`,
     };
   }
   return { ok: true, reason: "match" };
