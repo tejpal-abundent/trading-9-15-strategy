@@ -424,6 +424,19 @@ test("gateSatisfied: choppy_structure overlap=80 mixed slope=flat → true (genu
   assert.equal(gateSatisfied("choppy_structure", m, "long"), true);
 });
 
+test("gateSatisfied: choppy_structure overlap≥75 + mixed + shallow slope → keeps flag (boundary)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "mixed", overlap_pct: 75 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "up",
+      slope_steepness: "shallow",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), true);
+});
+
 test("gateSatisfied: choppy_structure overlap=80 mixed slope=steep → false (pullback in trend)", () => {
   const m = mkMeasurements({
     recent_5_bars: { direction: "mixed", overlap_pct: 80 },
