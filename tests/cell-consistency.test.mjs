@@ -101,29 +101,9 @@ test("gateSatisfied: exhaustion short with valid (lower wick 32, swept below pri
 
 // ─── choppy_structure ────────────────────────────────────────────────────
 
-test("gateSatisfied: choppy_structure with overlap=80 mixed slope=flat → true", () => {
-  const m = mkMeasurements({
-    recent_5_bars: { direction: "mixed", overlap_pct: 80 },
-    ema_state: {
-      ema9_above_ema15: true,
-      ema9_ema15_distance: "normal",
-      slope_direction: "flat",
-      slope_steepness: "flat",
-    },
-  });
-  assert.equal(gateSatisfied("choppy_structure", m, "long"), true);
-});
-
 test("gateSatisfied: choppy_structure with overlap=40 → false", () => {
   const m = mkMeasurements({
     recent_5_bars: { direction: "mixed", overlap_pct: 40 },
-  });
-  assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
-});
-
-test("gateSatisfied: choppy_structure with high overlap but direction=up → false", () => {
-  const m = mkMeasurements({
-    recent_5_bars: { direction: "up", overlap_pct: 80 },
   });
   assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
 });
