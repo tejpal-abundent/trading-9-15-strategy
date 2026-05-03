@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ltfCellState, evaluateHtfChain, dailyCellState, dailyTriggerType } from "../src/scanner.js";
+import { ltfCellState, evaluateHtfChain, dailyCellState, dailyTriggerType, weeklyStopDecision } from "../src/scanner.js";
 
 // ─── ltfCellState — NONE: insufficient prep or red flags ─────────────────
 
@@ -319,7 +319,7 @@ test("dailyCellState: prep ready but candle_verdict.in_bias=false → WATCH", ()
   assert.equal(dailyCellState(cell), "WATCH");
 });
 
-test("dailyCellState: prep ready, in_bias=true but winner_strength < 7 → WATCH", () => {
+test("dailyCellState: prep ready, in_bias=true but winner_strength=5 → WATCH", () => {
   const cell = {
     direction_conflict: false,
     prep_signals_count: 3,
@@ -463,4 +463,260 @@ test("dailyTriggerType: returns 'none' when state !== ENTER", () => {
     },
   };
   assert.equal(dailyTriggerType(cell, "long"), "none");
+});
+
+// ─── P5: winner_strength threshold lowered 7 → 6 ─────────────────────────
+
+function mkDailyCell(over = {}) {
+  return {
+    direction_conflict: false,
+    red_flags: [],
+    prep_signals_count: 3,
+    angle_ok: true,
+    zone_rejection: true,
+    coc_present: false,
+    solid_continuation: true,
+    setup_type: "pullback",
+    candle_verdict: {
+      in_bias: true,
+      winner_strength: 7,
+      pattern: "solid_bull",
+      liquidity_swept: "none",
+    },
+    ...over,
+  };
+}
+
+test("dailyCellState: winner_strength=6 + in_bias → ENTER (was WATCH under threshold=7)", () => {
+  const cell = mkDailyCell({
+    candle_verdict: { in_bias: true, winner_strength: 6, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "ENTER");
+});
+
+test("dailyCellState: winner_strength=5 + in_bias → WATCH", () => {
+  const cell = mkDailyCell({
+    candle_verdict: { in_bias: true, winner_strength: 5, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "WATCH");
+});
+
+test("dailyCellState: winner_strength=6 but in_bias=false → WATCH", () => {
+  const cell = mkDailyCell({
+    candle_verdict: { in_bias: false, winner_strength: 6, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "WATCH");
+});
+
+// ─── P6: weekly stop logic with fatal/warning split ──────────────────────
+
+function mkWeekly(over = {}) {
+  return {
+    direction: "long",
+    direction_conflict: false,
+    score: 7,
+    red_flags: [],
+    candle_verdict: { in_bias: true },
+    measurements: {
+      current_closed_bar: { color: "green", body_pct_of_range: 70, close_position: "upper_third" },
+    },
+    ...over,
+  };
+}
+
+test("weeklyStopDecision: no flags + score 7 + strong candle → null (no stop)", () => {
+  assert.equal(weeklyStopDecision(mkWeekly()), null);
+});
+
+test("weeklyStopDecision: fatal flag exhaustion → weekly_red_flag_fatal", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["exhaustion"] }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_fatal");
+  assert.deepEqual(d?.flags, ["exhaustion"]);
+});
+
+test("weeklyStopDecision: warning flag + strong candle + score 7 → null", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure"] }));
+  assert.equal(d, null);
+});
+
+test("weeklyStopDecision: warning flag + weak candle → weekly_red_flag_warning_no_compensation", () => {
+  const d = weeklyStopDecision(mkWeekly({
+    red_flags: ["choppy_structure"],
+    candle_verdict: { in_bias: false },
+  }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_warning_no_compensation");
+});
+
+test("weeklyStopDecision: warning + strong candle + score 6 → null (P8 compensation)", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure"], score: 6 }));
+  assert.equal(d, null);
+});
+
+test("weeklyStopDecision: warning + strong candle + score 5 → weekly_quality_low (below P8' floor)", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure"], score: 5 }));
+  assert.equal(d?.stop_reason, "weekly_quality_low");
+});
+
+test("weeklyStopDecision: no flags + strong candle + score 6 → null (P8' strong-candle compensation)", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: [], score: 6 }));
+  // mkWeekly's default candle_verdict + measurements satisfy isCandleStrongInBias
+  assert.equal(d, null);
+});
+
+test("weeklyStopDecision: no flags + weak candle + score 6 → weekly_quality_low (no compensation)", () => {
+  const d = weeklyStopDecision(mkWeekly({
+    red_flags: [],
+    score: 6,
+    candle_verdict: { in_bias: false },
+  }));
+  assert.equal(d?.stop_reason, "weekly_quality_low");
+});
+
+test("weeklyStopDecision: warning + weak candle + score 6 → weekly_red_flag_warning_no_compensation", () => {
+  const d = weeklyStopDecision(mkWeekly({
+    red_flags: ["choppy_structure"],
+    score: 6,
+    candle_verdict: { in_bias: false },
+  }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_warning_no_compensation");
+});
+
+test("weeklyStopDecision: unknown flag treated as fatal", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["xyz"] }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_fatal");
+});
+
+test("weeklyStopDecision: mixed fatal + warning → fatal (fatal wins)", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure", "exhaustion"] }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_fatal");
+  assert.deepEqual(d?.flags, ["exhaustion"]);
+});
+
+// ─── P3: trend-dominant daily WATCH override ─────────────────────────────
+
+function mkMonthlyDominant(over = {}) {
+  return {
+    direction: "long",
+    measurements: {
+      ema_state: { ema9_above_ema15: true, ema9_ema15_distance: "wide", slope_direction: "up", slope_steepness: "medium" },
+    },
+    ...over,
+  };
+}
+function mkWeeklyDominant(over = {}) {
+  return {
+    direction: "long",
+    red_flags: [],
+    measurements: {
+      ema_state: { ema9_above_ema15: true, ema9_ema15_distance: "wide", slope_direction: "up", slope_steepness: "steep" },
+    },
+    ...over,
+  };
+}
+
+test("dailyCellState: trend-dominant + prep=1 + in_bias decisive → WATCH", () => {
+  const cell = mkDailyCell({
+    prep_signals_count: 1,
+    angle_ok: true,
+    zone_rejection: false,
+    coc_present: false,
+    solid_continuation: false,
+    setup_type: "none",
+    candle_verdict: { in_bias: true, winner_strength: 5, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "WATCH");
+});
+
+test("dailyCellState: trend-dominant + prep=1 + in_bias + winner_strength=8 → WATCH (never ENTER)", () => {
+  // Locks the contract: the dominant prep=1 path returns WATCH-only,
+  // even with a high winner_strength that would normally ENTER.
+  const cell = mkDailyCell({
+    prep_signals_count: 1,
+    setup_type: "none",
+    candle_verdict: { in_bias: true, winner_strength: 8, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "WATCH");
+});
+
+test("dailyCellState: trend-dominant + prep=1 + counter-bias → NONE", () => {
+  const cell = mkDailyCell({
+    prep_signals_count: 1,
+    setup_type: "none",
+    candle_verdict: { in_bias: false, winner_strength: 5, pattern: "none", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "NONE");
+});
+
+test("dailyCellState: NOT trend-dominant + prep=1 → NONE (standard floor)", () => {
+  const cell = mkDailyCell({
+    prep_signals_count: 1,
+    setup_type: "none",
+    candle_verdict: { in_bias: true, winner_strength: 7 },
+  });
+  assert.equal(dailyCellState(cell, null, null), "NONE");
+});
+
+test("dailyCellState: trend-dominant + prep=2 + in_bias + strength 6 → ENTER (standard ENTER path)", () => {
+  const cell = mkDailyCell({
+    prep_signals_count: 2,
+    angle_ok: true,
+    zone_rejection: true,
+    setup_type: "none",
+    candle_verdict: { in_bias: true, winner_strength: 6, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "ENTER");
+});
+
+// ─── P4: dailyCellState consults computeSetupMatchCount for ENTER ────────
+
+test("dailyCellState: pullback ENTER passes when both required signals true", () => {
+  const cell = mkDailyCell({
+    setup_type: "pullback",
+    angle_ok: true,
+    zone_rejection: true,
+    solid_continuation: false,
+    coc_present: false,
+    prep_signals_count: 2,
+    candle_verdict: { in_bias: true, winner_strength: 7, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "ENTER");
+});
+
+test("dailyCellState: pullback ENTER blocked when required zone_rejection missing → WATCH", () => {
+  const cell = mkDailyCell({
+    setup_type: "pullback",
+    angle_ok: true,
+    zone_rejection: false,
+    solid_continuation: true,
+    coc_present: false,
+    prep_signals_count: 2,
+    candle_verdict: { in_bias: true, winner_strength: 7 },
+  });
+  assert.equal(dailyCellState(cell), "WATCH");
+});
+
+test("dailyCellState: continuation ENTER passes when solid_continuation + angle_ok true", () => {
+  const cell = mkDailyCell({
+    setup_type: "continuation",
+    angle_ok: true,
+    zone_rejection: false,
+    solid_continuation: true,
+    coc_present: false,
+    prep_signals_count: 2,
+    candle_verdict: { in_bias: true, winner_strength: 7, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "ENTER");
+});
+
+test("dailyCellState: setup_type=none falls back to legacy prep ≥ 2 floor", () => {
+  const cell = mkDailyCell({
+    setup_type: "none",
+    angle_ok: true,
+    zone_rejection: true,
+    solid_continuation: false,
+    coc_present: false,
+    prep_signals_count: 2,
+    candle_verdict: { in_bias: true, winner_strength: 7 },
+  });
+  assert.equal(dailyCellState(cell), "ENTER");
 });

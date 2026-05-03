@@ -1,13 +1,27 @@
 //@version=5
-// Drop this into TradingView Pine Editor and add to chart, then save the
-// chart as your default layout. Every symbol you open will then carry these
-// EMAs — which is what the bot's visual gate (Gemini) expects to see.
-indicator("MTF Helper — EMA9 + EMA15", overlay=true, max_labels_count=20)
+// MTF Helper v2 — EMA9 + EMA15 + signal layer aligned with the V2 scanner.
+//
+// Drop into TradingView Pine Editor, add to chart, save as default layout.
+// Every symbol you open then carries the EMAs the bot's visual gate (Gemini)
+// expects to see — and the same trigger/sweep/rejection signals your V2
+// pipeline grades against.
+indicator("MTF Helper v2 — EMA9+15 + signals", overlay=true, max_labels_count=200, max_lines_count=20)
 
-showSlope     = input.bool(true,  "Show slope-based bias bands")
-slopeLookback = input.int(3,      "Slope lookback (bars)", minval=1)
-showZoneFill  = input.bool(true,  "Highlight EMA9-EMA15 band")
+// ─── Inputs ──────────────────────────────────────────────────────────────
+showSlope        = input.bool(true,  "Slope-based bias bands")
+slopeLookback    = input.int(3,      "Slope lookback (bars)", minval=1)
+showZoneFill     = input.bool(true,  "Highlight EMA9-EMA15 band")
+showSweeps       = input.bool(true,  "Liquidity sweep markers (▲▼) — bias only")
+showZoneEntry    = input.bool(false, "Zone entry dots (first bar in band)")
+showRejections   = input.bool(true,  "Zone rejection dots (bias only)")
+showStrongCandle = input.bool(true,  "Strong-candle markers (◆) — bias only, no clusters")
+showMtfTable     = input.bool(true,  "MTF bias table")
+showCounterBias  = input.bool(false, "Counter-bias warning labels")
 
+strongBodyPct  = input.float(60, "Strong-candle body % threshold", minval=10, maxval=100)
+sweepWickPct   = input.float(30, "Sweep wick % threshold",         minval=10, maxval=100)
+
+// ─── Core EMAs ───────────────────────────────────────────────────────────
 ema9  = ta.ema(close, 9)
 ema15 = ta.ema(close, 15)
 
@@ -15,6 +29,10 @@ p9  = plot(ema9,  "EMA9",  color=color.new(color.orange, 0), linewidth=2)
 p15 = plot(ema15, "EMA15", color=color.new(color.purple, 0), linewidth=2)
 fill(p9, p15, color=showZoneFill ? color.new(color.gray, 80) : na, title="EMA9-15 zone")
 
+bandHigh = math.max(ema9, ema15)
+bandLow  = math.min(ema9, ema15)
+
+// ─── Slope + bias on current TF ──────────────────────────────────────────
 prev9   = ema9[slopeLookback]
 prev15  = ema15[slopeLookback]
 slope9  = ema9 - prev9
@@ -26,15 +44,107 @@ bothDown = slope9 < 0 and slope15 < 0 and ema9 < ema15
 bgcolor(showSlope and bothUp   ? color.new(color.green, 92) : na, title="Bullish bias band")
 bgcolor(showSlope and bothDown ? color.new(color.red,   92) : na, title="Bearish bias band")
 
-var table info = table.new(position.top_right, 2, 4, border_width=1)
-if barstate.islast
-    bias      = bothUp ? "BULLISH" : bothDown ? "BEARISH" : "—"
+atr14    = ta.atr(14)
+slopeAtr = math.abs(slope9) / math.max(atr14, syminfo.mintick)
+steepness  = slopeAtr > 1.0  ? "steep"  : slopeAtr > 0.4 ? "medium" : "shallow"
+steepColor = slopeAtr > 1.0  ? color.lime : slopeAtr > 0.4 ? color.aqua : color.gray
+
+// ─── Candle anatomy ──────────────────────────────────────────────────────
+barRange     = math.max(high - low, syminfo.mintick)
+bodyPct      = math.abs(close - open) / barRange * 100
+upperWickPct = (high - math.max(open, close)) / barRange * 100
+lowerWickPct = (math.min(open, close) - low)  / barRange * 100
+isGreen      = close > open
+isRed        = close < open
+closeAtHigh  = (high - close) / barRange < 0.05
+closeAtLow   = (close - low)  / barRange < 0.05
+closeUpperThird = (high - close) / barRange < 0.33
+closeLowerThird = (close - low)  / barRange < 0.33
+
+// ─── Liquidity sweeps (gated to bias direction) ─────────────────────────
+priorHigh = high[1]
+priorLow  = low[1]
+bullishSweepRaw = low  < priorLow  and close > priorLow  and isGreen and lowerWickPct >= sweepWickPct
+bearishSweepRaw = high > priorHigh and close < priorHigh and isRed   and upperWickPct >= sweepWickPct
+bullishSweep = bullishSweepRaw and bothUp
+bearishSweep = bearishSweepRaw and bothDown
+
+plotshape(showSweeps and bullishSweep, title="Bullish sweep", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny)
+plotshape(showSweeps and bearishSweep, title="Bearish sweep", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny)
+
+// ─── Zone touch + rejection (zone entry = transition only, in bias) ─────
+inZone     = high >= bandLow and low <= bandHigh
+prevInZone = inZone[1]
+zoneEntry      = inZone and not prevInZone and (bothUp or bothDown)
+rejectionLong  = prevInZone and close > bandHigh and bothUp   and isGreen
+rejectionShort = prevInZone and close < bandLow  and bothDown and isRed
+
+plotshape(showZoneEntry and zoneEntry, title="Zone entry", style=shape.circle, location=location.belowbar, color=color.new(color.gray, 30), size=size.tiny)
+plotshape(showRejections and rejectionLong, title="Long zone rejection", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 0), size=size.small)
+plotshape(showRejections and rejectionShort, title="Short zone rejection", style=shape.circle, location=location.abovebar, color=color.new(color.red, 0), size=size.small)
+
+// ─── Strong-candle marker (in bias, no consecutive clusters) ────────────
+strongLong  = bodyPct >= strongBodyPct and isGreen and (closeAtHigh or closeUpperThird)
+strongShort = bodyPct >= strongBodyPct and isRed   and (closeAtLow  or closeLowerThird)
+strongInBiasRaw = (strongLong and bothUp) or (strongShort and bothDown)
+strongInBias    = strongInBiasRaw and not strongInBiasRaw[1]
+
+plotshape(showStrongCandle and strongInBias, title="Strong-candle in bias", style=shape.diamond, location=location.bottom, color=bothUp ? color.new(color.lime, 0) : color.new(color.red, 0), size=size.tiny)
+
+// ─── Counter-bias warning ───────────────────────────────────────────────
+counterLong  = bothUp   and isRed   and high > priorHigh and closeLowerThird and upperWickPct >= sweepWickPct
+counterShort = bothDown and isGreen and low  < priorLow  and closeUpperThird and lowerWickPct >= sweepWickPct
+
+if showCounterBias and counterLong
+    label.new(bar_index, high, "⚠", style=label.style_label_down, color=color.new(color.orange, 60), textcolor=color.white, size=size.tiny)
+if showCounterBias and counterShort
+    label.new(bar_index, low, "⚠", style=label.style_label_up, color=color.new(color.orange, 60), textcolor=color.white, size=size.tiny)
+
+// ─── MTF bias from higher timeframes ────────────────────────────────────
+f_bias() =>
+    e9  = ta.ema(close, 9)
+    e15 = ta.ema(close, 15)
+    s9  = e9  - e9[3]
+    s15 = e15 - e15[3]
+    up  = s9 > 0 and s15 > 0 and e9 > e15
+    dn  = s9 < 0 and s15 < 0 and e9 < e15
+    up ? "📈 LONG" : dn ? "📉 SHORT" : "—"
+
+mtfDaily   = request.security(syminfo.tickerid, "D", f_bias(), lookahead=barmerge.lookahead_off)
+mtfWeekly  = request.security(syminfo.tickerid, "W", f_bias(), lookahead=barmerge.lookahead_off)
+mtfMonthly = request.security(syminfo.tickerid, "M", f_bias(), lookahead=barmerge.lookahead_off)
+
+f_biasColor(b) =>
+    str.contains(b, "LONG") ? color.green : str.contains(b, "SHORT") ? color.red : color.gray
+
+// ─── Distance-to-zone ───────────────────────────────────────────────────
+distancePct = close > bandHigh ? (close - bandHigh) / close * 100 : close < bandLow ? (close - bandLow) / close * 100 : 0.0
+distanceTxt = inZone ? "in zone" : (distancePct > 0 ? "+" : "") + str.tostring(distancePct, "#.##") + "%"
+
+// ─── Info table ──────────────────────────────────────────────────────────
+var table info = table.new(position.top_right, 2, 7, border_width=1)
+if showMtfTable and barstate.islast
+    bias      = bothUp ? "📈 LONG" : bothDown ? "📉 SHORT" : "—"
     biasColor = bothUp ? color.green : bothDown ? color.red : color.gray
     table.cell(info, 0, 0, "MTF Helper", text_color=color.white, bgcolor=color.new(color.blue, 30))
     table.cell(info, 1, 0, str.tostring(close, "#.####"), text_color=color.white, bgcolor=color.new(color.blue, 30))
-    table.cell(info, 0, 1, "EMA9",  text_color=color.white)
-    table.cell(info, 1, 1, str.tostring(ema9, "#.####"),  text_color=color.orange)
-    table.cell(info, 0, 2, "EMA15", text_color=color.white)
-    table.cell(info, 1, 2, str.tostring(ema15, "#.####"), text_color=color.purple)
-    table.cell(info, 0, 3, "Bias",  text_color=color.white)
-    table.cell(info, 1, 3, bias,    text_color=biasColor)
+    table.cell(info, 0, 1, "1M",       text_color=color.white)
+    table.cell(info, 1, 1, mtfMonthly, text_color=f_biasColor(mtfMonthly))
+    table.cell(info, 0, 2, "1W",       text_color=color.white)
+    table.cell(info, 1, 2, mtfWeekly,  text_color=f_biasColor(mtfWeekly))
+    table.cell(info, 0, 3, "1D",       text_color=color.white)
+    table.cell(info, 1, 3, mtfDaily,   text_color=f_biasColor(mtfDaily))
+    table.cell(info, 0, 4, "Current",  text_color=color.white)
+    table.cell(info, 1, 4, bias,       text_color=biasColor)
+    table.cell(info, 0, 5, "Slope",    text_color=color.white)
+    table.cell(info, 1, 5, steepness,  text_color=steepColor)
+    table.cell(info, 0, 6, "EMA dist", text_color=color.white)
+    table.cell(info, 1, 6, distanceTxt, text_color=color.aqua)
+
+// ─── Alerts ──────────────────────────────────────────────────────────────
+alertcondition(bullishSweep,   title="Bullish liquidity sweep", message="{{ticker}} bullish sweep on {{interval}} — close={{close}}")
+alertcondition(bearishSweep,   title="Bearish liquidity sweep", message="{{ticker}} bearish sweep on {{interval}} — close={{close}}")
+alertcondition(rejectionLong,  title="Long zone rejection",     message="{{ticker}} long rejection from EMA9-15 zone on {{interval}} — close={{close}}")
+alertcondition(rejectionShort, title="Short zone rejection",    message="{{ticker}} short rejection from EMA9-15 zone on {{interval}} — close={{close}}")
+alertcondition(strongInBias,   title="Strong-candle in bias",   message="{{ticker}} strong-bias candle on {{interval}} — close={{close}}")
+alertcondition(ta.cross(ema9, ema15), title="EMA9/15 cross",    message="{{ticker}} EMA9/15 cross on {{interval}} — close={{close}}")

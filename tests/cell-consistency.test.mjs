@@ -101,13 +101,6 @@ test("gateSatisfied: exhaustion short with valid (lower wick 32, swept below pri
 
 // ─── choppy_structure ────────────────────────────────────────────────────
 
-test("gateSatisfied: choppy_structure with overlap=70 mixed → true", () => {
-  const m = mkMeasurements({
-    recent_5_bars: { direction: "mixed", overlap_pct: 70 },
-  });
-  assert.equal(gateSatisfied("choppy_structure", m, "long"), true);
-});
-
 test("gateSatisfied: choppy_structure with overlap=40 → false", () => {
   const m = mkMeasurements({
     recent_5_bars: { direction: "mixed", overlap_pct: 40 },
@@ -115,22 +108,15 @@ test("gateSatisfied: choppy_structure with overlap=40 → false", () => {
   assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
 });
 
-test("gateSatisfied: choppy_structure with high overlap but direction=up → false", () => {
-  const m = mkMeasurements({
-    recent_5_bars: { direction: "up", overlap_pct: 80 },
-  });
-  assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
-});
-
 // ─── tangled_emas ────────────────────────────────────────────────────────
 
-test("gateSatisfied: tangled_emas with tight distance → true", () => {
+test("gateSatisfied: tangled_emas with tight distance slope=flat → true", () => {
   const m = mkMeasurements({
     ema_state: {
       ema9_above_ema15: true,
       ema9_ema15_distance: "tight",
-      slope_direction: "up",
-      slope_steepness: "medium",
+      slope_direction: "flat",
+      slope_steepness: "flat",
     },
   });
   assert.equal(gateSatisfied("tangled_emas", m, "long"), true);
@@ -327,8 +313,8 @@ test("validateCellConsistency: mixed flags — invalid dropped, valid kept", () 
       ema_state: {
         ema9_above_ema15: true,
         ema9_ema15_distance: "tight", // satisfies tangled_emas
-        slope_direction: "up",
-        slope_steepness: "medium",
+        slope_direction: "flat",
+        slope_steepness: "flat",
       },
     }),
     candle_verdict: { liquidity_swept: "none", in_bias: false },
@@ -401,4 +387,261 @@ test("validateCellConsistency: in_bias=true with body 65% → preserved", () => 
   };
   const out = validateCellConsistency(cell);
   assert.equal(out.candle_verdict.in_bias, true);
+});
+
+// ─── P1: choppy_structure tightened gate ─────────────────────────────────
+
+test("gateSatisfied: choppy_structure overlap=80 mixed slope=flat → true (genuine chop)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "mixed", overlap_pct: 80 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "flat",
+      slope_steepness: "flat",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), true);
+});
+
+test("gateSatisfied: choppy_structure overlap≥75 + mixed + shallow slope → keeps flag (boundary)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "mixed", overlap_pct: 75 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "up",
+      slope_steepness: "shallow",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), true);
+});
+
+test("gateSatisfied: choppy_structure overlap=80 mixed slope=steep → false (pullback in trend)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "mixed", overlap_pct: 80 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "wide",
+      slope_direction: "up",
+      slope_steepness: "steep",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
+});
+
+test("gateSatisfied: choppy_structure overlap=70 mixed slope=flat → false (below new threshold)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "mixed", overlap_pct: 70 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "flat",
+      slope_steepness: "flat",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
+});
+
+test("gateSatisfied: choppy_structure overlap=80 direction=up slope=flat → false (not mixed)", () => {
+  const m = mkMeasurements({
+    recent_5_bars: { direction: "up", overlap_pct: 80 },
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "flat",
+      slope_steepness: "flat",
+    },
+  });
+  assert.equal(gateSatisfied("choppy_structure", m, "long"), false);
+});
+
+// ─── P2: tangled_emas tightened gate ─────────────────────────────────────
+
+test("gateSatisfied: tangled_emas tight + slope=shallow → true (genuinely tangled)", () => {
+  const m = mkMeasurements({
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "tight",
+      slope_direction: "up",
+      slope_steepness: "shallow",
+    },
+  });
+  assert.equal(gateSatisfied("tangled_emas", m, "long"), true);
+});
+
+test("gateSatisfied: tangled_emas tight + slope=steep → false (consolidation before continuation)", () => {
+  const m = mkMeasurements({
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "tight",
+      slope_direction: "up",
+      slope_steepness: "steep",
+    },
+  });
+  assert.equal(gateSatisfied("tangled_emas", m, "long"), false);
+});
+
+test("gateSatisfied: tangled_emas distance=normal slope=flat → false (not tight)", () => {
+  const m = mkMeasurements({
+    ema_state: {
+      ema9_above_ema15: true,
+      ema9_ema15_distance: "normal",
+      slope_direction: "flat",
+      slope_steepness: "flat",
+    },
+  });
+  assert.equal(gateSatisfied("tangled_emas", m, "long"), false);
+});
+
+// ─── validateCellConsistency: fallbackDirection (daily-cell fix) ─────────
+//
+// Daily cells don't carry a `direction` field of their own — they inherit
+// bias from the weekly cell. Without a fallback, every daily red-flag gate
+// short-circuits to "keep" because `direction` is undefined and the
+// "no bias" branch in gateSatisfied returns true. The fallback wiring is
+// what lets the validator actually catch self-contradicting daily flags.
+
+test("validateCellConsistency: daily cell, exhaustion flag, fallback=short, valid counter-bias measurements → flag KEPT", () => {
+  // SHORT exhaustion = green close, lower wick ≥ 30, swept below prior low.
+  const cell = {
+    tf: "1D",
+    direction_conflict: false,
+    red_flags: ["exhaustion"],
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "green",
+        body_pct_of_range: 30,
+        upper_wick_pct: 5,
+        lower_wick_pct: 40,
+        close_position: "upper_third",
+        high_vs_prior_bar_high: "below",
+        low_vs_prior_bar_low: "below",
+      },
+    }),
+    candle_verdict: { liquidity_swept: "none", in_bias: false },
+  };
+  const out = validateCellConsistency(cell, "short");
+  assert.deepEqual(out.red_flags, ["exhaustion"]);
+});
+
+test("validateCellConsistency: daily cell, exhaustion flag, fallback=short, no counter-bias → flag DROPPED", () => {
+  // SHORT bias but candle is RED with strong body — not exhaustion.
+  const cell = {
+    tf: "1D",
+    direction_conflict: false,
+    red_flags: ["exhaustion"],
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "red",
+        body_pct_of_range: 87,
+        upper_wick_pct: 5,
+        lower_wick_pct: 5,
+        close_position: "lower_third",
+        high_vs_prior_bar_high: "below",
+        low_vs_prior_bar_low: "below",
+      },
+    }),
+    candle_verdict: { liquidity_swept: "none", in_bias: true },
+  };
+  const out = validateCellConsistency(cell, "short");
+  assert.deepEqual(out.red_flags, []);
+  assert.match(out.consistency_log[0], /exhaustion/);
+});
+
+test("validateCellConsistency: daily cell, exhaustion flag, NO fallback → flag KEPT (legacy passthrough, backward compat)", () => {
+  // No fallback direction provided — gateSatisfied returns true on its
+  // "no bias" branch, so the flag survives. This pins the pre-fix behavior
+  // to confirm the signature change is backward compatible for any single-
+  // arg caller that hasn't been updated.
+  const cell = {
+    tf: "1D",
+    direction_conflict: false,
+    red_flags: ["exhaustion"],
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "red",
+        body_pct_of_range: 87,
+        upper_wick_pct: 5,
+        lower_wick_pct: 5,
+        close_position: "lower_third",
+        high_vs_prior_bar_high: "below",
+        low_vs_prior_bar_low: "below",
+      },
+    }),
+    candle_verdict: { liquidity_swept: "none", in_bias: true },
+  };
+  const out = validateCellConsistency(cell);
+  assert.deepEqual(out.red_flags, ["exhaustion"]);
+});
+
+test("validateCellConsistency: EURCHF reproduction — short bias, red mid-body daily, exhaustion flag DROPPED", () => {
+  // Mirrors the EURCHF daily cell in scan-results/scan-v2-watchlist-2026-05-03T14-12-29-322Z.json:
+  // weekly.direction=short, daily candle red, body 38, lower_wick 38, low_vs_prior=below,
+  // high_vs_prior=below, color=red. Counter-bias for short would need GREEN close
+  // — this is RED, so exhaustion gate must reject the flag.
+  const cell = {
+    tf: "1D",
+    direction_conflict: false,
+    setup_type: "pullback",
+    angle_ok: true,
+    zone_rejection: true,
+    coc_present: true,
+    solid_continuation: false,
+    prep_signals_count: 3,
+    red_flags: ["exhaustion"],
+    candle_verdict: {
+      body_type: "normal",
+      body_pct_of_range: 38,
+      upper_wick_pct: 25,
+      lower_wick_pct: 38,
+      close_position: "mid",
+      winner: "mixed",
+      winner_strength: 3,
+      liquidity_swept: "none",
+      pattern: "none",
+      in_bias: false,
+    },
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "red",
+        body_pct_of_range: 38,
+        upper_wick_pct: 25,
+        lower_wick_pct: 38,
+        close_position: "mid",
+        high_vs_prior_bar_high: "below",
+        low_vs_prior_bar_low: "below",
+      },
+    }),
+  };
+  const out = validateCellConsistency(cell, "short");
+  assert.deepEqual(out.red_flags, []);
+  assert.ok(out.consistency_log && out.consistency_log.length >= 1);
+  assert.match(out.consistency_log[0], /exhaustion/);
+});
+
+test("validateCellConsistency: cell with own direction takes priority over fallback", () => {
+  // If the cell already has a `direction` (monthly/weekly cells), the
+  // fallback should not override it. Cell direction=long, fallback=short:
+  // measurements only satisfy the LONG exhaustion gate.
+  const cell = {
+    direction: "long",
+    red_flags: ["exhaustion"],
+    measurements: mkMeasurements({
+      current_closed_bar: {
+        color: "red",
+        body_pct_of_range: 30,
+        upper_wick_pct: 40,
+        lower_wick_pct: 5,
+        close_position: "lower_third",
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "above",
+      },
+    }),
+    candle_verdict: { liquidity_swept: "none", in_bias: false },
+  };
+  const out = validateCellConsistency(cell, "short");
+  // Cell's own direction=long is used; LONG exhaustion is satisfied
+  // (red bar, upper wick 40, swept above prior high). Flag KEPT.
+  assert.deepEqual(out.red_flags, ["exhaustion"]);
 });
