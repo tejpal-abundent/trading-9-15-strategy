@@ -26,6 +26,11 @@ const RESULT_DIR = "scan-results";
 // rubric grades 5-7). Was 7 previously, which forced the model to overshoot.
 const ENTER_WINNER_STRENGTH_THRESHOLD = 6;
 
+// P3: WATCH override threshold. The trend-dominant prep=1 path admits a daily
+// cell with a slightly weaker close (winner_strength ≥ 5) than the standard
+// ENTER threshold (6) — the HTF context already provides bias confidence.
+const WATCH_DOMINANT_WINNER_STRENGTH_THRESHOLD = 5;
+
 // P6: Red-flag classification.
 // Fatal flags always stop the cascade. Warning flags allow a score-7 cell
 // to pass IF the candle is strongly in-bias (see isCandleStrongInBias).
@@ -190,7 +195,7 @@ export function dailyCellState(cell, monthly = null, weekly = null) {
 
   // Trend-dominant prep=1 path: only WATCH (never ENTER), and requires in_bias + strength ≥ 5
   if (dominant && prep === 1) {
-    if (v.in_bias === true && (v.winner_strength ?? 0) >= 5) return "WATCH";
+    if (v.in_bias === true && (v.winner_strength ?? 0) >= WATCH_DOMINANT_WINNER_STRENGTH_THRESHOLD) return "WATCH";
     return "NONE";
   }
 

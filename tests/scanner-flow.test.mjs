@@ -598,6 +598,17 @@ test("dailyCellState: trend-dominant + prep=1 + in_bias decisive → WATCH", () 
   assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "WATCH");
 });
 
+test("dailyCellState: trend-dominant + prep=1 + in_bias + winner_strength=8 → WATCH (never ENTER)", () => {
+  // Locks the contract: the dominant prep=1 path returns WATCH-only,
+  // even with a high winner_strength that would normally ENTER.
+  const cell = mkDailyCell({
+    prep_signals_count: 1,
+    setup_type: "none",
+    candle_verdict: { in_bias: true, winner_strength: 8, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "WATCH");
+});
+
 test("dailyCellState: trend-dominant + prep=1 + counter-bias → NONE", () => {
   const cell = mkDailyCell({
     prep_signals_count: 1,
