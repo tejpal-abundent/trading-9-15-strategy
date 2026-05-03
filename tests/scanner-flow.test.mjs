@@ -464,3 +464,46 @@ test("dailyTriggerType: returns 'none' when state !== ENTER", () => {
   };
   assert.equal(dailyTriggerType(cell, "long"), "none");
 });
+
+// ─── P5: winner_strength threshold lowered 7 → 6 ─────────────────────────
+
+function mkDailyCell(over = {}) {
+  return {
+    direction_conflict: false,
+    red_flags: [],
+    prep_signals_count: 3,
+    angle_ok: true,
+    zone_rejection: true,
+    coc_present: false,
+    solid_continuation: true,
+    setup_type: "pullback",
+    candle_verdict: {
+      in_bias: true,
+      winner_strength: 7,
+      pattern: "solid_bull",
+      liquidity_swept: "none",
+    },
+    ...over,
+  };
+}
+
+test("dailyCellState: winner_strength=6 + in_bias → ENTER (was WATCH under threshold=7)", () => {
+  const cell = mkDailyCell({
+    candle_verdict: { in_bias: true, winner_strength: 6, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "ENTER");
+});
+
+test("dailyCellState: winner_strength=5 + in_bias → WATCH", () => {
+  const cell = mkDailyCell({
+    candle_verdict: { in_bias: true, winner_strength: 5, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "WATCH");
+});
+
+test("dailyCellState: winner_strength=6 but in_bias=false → WATCH", () => {
+  const cell = mkDailyCell({
+    candle_verdict: { in_bias: false, winner_strength: 6, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "WATCH");
+});

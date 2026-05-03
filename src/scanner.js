@@ -21,6 +21,11 @@ const HTF_TIMEFRAMES = ["1M", "1W", "1D"];
 const LTF_TIMEFRAMES = ["4H", "2H", "1H"];
 const RESULT_DIR = "scan-results";
 
+// P5: ENTER requires a decisive in-bias close. Threshold set at 6 to admit
+// "body ≥ 60% closing in upper/lower third" candles (which the daily prompt
+// rubric grades 5-7). Was 7 previously, which forced the model to overshoot.
+const ENTER_WINNER_STRENGTH_THRESHOLD = 6;
+
 // Filesystem-safe slug from a watchlist entry's TV symbol.
 export function slugify(label) {
   return label.replace(/[^A-Za-z0-9_-]/g, "_");
@@ -77,7 +82,7 @@ export function dailyCellState(cell) {
   const v = cell.candle_verdict;
   if (!v || typeof v !== "object") return "NONE";
   if (v.in_bias !== true) return "WATCH";
-  if ((v.winner_strength ?? 0) < 7) return "WATCH";
+  if ((v.winner_strength ?? 0) < ENTER_WINNER_STRENGTH_THRESHOLD) return "WATCH";
   return "ENTER";
 }
 
