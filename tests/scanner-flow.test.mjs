@@ -552,13 +552,23 @@ test("weeklyStopDecision: warning + strong candle + score 6 → null (P8 compens
   assert.equal(d, null);
 });
 
-test("weeklyStopDecision: warning + strong candle + score 5 → weekly_quality_low (below P8 floor)", () => {
+test("weeklyStopDecision: warning + strong candle + score 5 → weekly_quality_low (below P8' floor)", () => {
   const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure"], score: 5 }));
   assert.equal(d?.stop_reason, "weekly_quality_low");
 });
 
-test("weeklyStopDecision: no flags + score 6 → weekly_quality_low (no warning to compensate)", () => {
+test("weeklyStopDecision: no flags + strong candle + score 6 → null (P8' strong-candle compensation)", () => {
   const d = weeklyStopDecision(mkWeekly({ red_flags: [], score: 6 }));
+  // mkWeekly's default candle_verdict + measurements satisfy isCandleStrongInBias
+  assert.equal(d, null);
+});
+
+test("weeklyStopDecision: no flags + weak candle + score 6 → weekly_quality_low (no compensation)", () => {
+  const d = weeklyStopDecision(mkWeekly({
+    red_flags: [],
+    score: 6,
+    candle_verdict: { in_bias: false },
+  }));
   assert.equal(d?.stop_reason, "weekly_quality_low");
 });
 

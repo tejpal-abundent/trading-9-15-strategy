@@ -123,33 +123,30 @@ test("replayResult: does not mutate the caller's nested cell fields", () => {
 
 import { spawnSync } from "node:child_process";
 
-test("backtest CLI: golden assertion against scan rows passes (baseline)", () => {
+test("backtest CLI: golden assertion against scan rows passes after gate recalibration", () => {
   const result = spawnSync("node", ["tools/backtest.mjs", "--quiet"], {
     encoding: "utf8",
     cwd: process.cwd(),
   });
-  // BASELINE expectation under PRE-CHANGE code:
-  // The 6 scan rows include AUDUSD/GBPJPY/USOIL which currently DO NOT match the expected
-  // verdicts (they currently stop at weekly_red_flag / etc., not the post-change targets).
-  // So the baseline is EXPECTED TO FAIL with exit code 1. Subsequent tasks make it pass.
+  // After P1-P8' gate recalibration, all 6 golden rows should PASS — the
+  // recalibrated gates produce the verdicts the golden CSV asserts.
   assert.equal(
     result.status,
-    1,
-    `expected exit 1 (golden mismatch on baseline) — stdout was:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    0,
+    `expected exit 0 (all golden rows pass) — stdout was:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
-  assert.match(result.stdout, /AUDUSD.*FAIL/, "expected AUDUSD to fail under baseline");
+  assert.match(result.stdout, /AUDUSD.*PASS/, "expected AUDUSD to pass after recalibration");
+  assert.match(result.stdout, /GBPJPY.*PASS/, "expected GBPJPY to pass after recalibration");
 });
 
-test("backtest CLI: --strict flag exits 2 when replay diff is empty (no changes yet)", () => {
+test("backtest CLI: --strict flag exits 2 when replay diff is non-empty after recalibration", () => {
   const result = spawnSync("node", ["tools/backtest.mjs", "--quiet", "--strict"], {
     encoding: "utf8",
     cwd: process.cwd(),
   });
-  // Under baseline, replay against latest scan should produce a diff of 0 (current code
-  // reproduces stored verdicts exactly). So --strict should NOT fire — exit code is 1
-  // because golden assertions still fail.
-  // TODO(T6+): once gate retunings land, replay diff becomes non-empty AND golden
-  // passes — at that point this test should assert exit 0 (not !== 2). Update or
-  // delete here when the meaning of "baseline" changes.
-  assert.notEqual(result.status, 2, "expected exit code != 2 under baseline (replay diff = 0)");
+  // After gate recalibration, the replay engine produces verdicts that differ
+  // from the stored scan results (the stored results were produced by the
+  // pre-recalibration code). With --strict, that non-empty diff makes backtest
+  // exit 2 even though golden assertions all pass.
+  assert.equal(result.status, 2, `expected exit 2 (replay diff non-empty under --strict) — stdout was:\n${result.stdout}\nstderr:\n${result.stderr}`);
 });

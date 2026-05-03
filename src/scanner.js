@@ -31,13 +31,14 @@ const ENTER_WINNER_STRENGTH_THRESHOLD = 6;
 // ENTER threshold (6) — the HTF context already provides bias confidence.
 const WATCH_DOMINANT_WINNER_STRENGTH_THRESHOLD = 5;
 
-// Weekly quality score floors. STANDARD_WEEKLY_SCORE_FLOOR is the default minimum
-// for the cascade to continue past weekly. WARNING_COMPENSATED_WEEKLY_SCORE_FLOOR
-// applies when the cell has only warning red flags AND the candle is strongly
-// in-bias — the strong close offsets one missing rubric item beyond what
-// warning compensation already covered (score 7 → 6).
+// Weekly quality score floors. STANDARD_WEEKLY_SCORE_FLOOR is the default
+// minimum for the cascade to continue past weekly. STRONG_CANDLE_WEEKLY_SCORE_FLOOR
+// applies when the most recent closed weekly candle is decisively in-bias
+// (body ≥ 60%, color matches direction, close at extreme/upper-third for long
+// or extreme/lower-third for short) — the strong close is dominant evidence
+// of conviction, and offsets one missing rubric item.
 const STANDARD_WEEKLY_SCORE_FLOOR = 7;
-const WARNING_COMPENSATED_WEEKLY_SCORE_FLOOR = 6;
+const STRONG_CANDLE_WEEKLY_SCORE_FLOOR = 6;
 
 // P6: Red-flag classification.
 // Fatal flags always stop the cascade. Warning flags allow a score-7 cell
@@ -177,9 +178,19 @@ export function detectCalibrationAnomaly(results) {
   return { topReason, topCount, total, dominance };
 }
 
-// P6: Decides whether a weekly cell should stop the cascade. Returns null
+// P6/P8': Decides whether a weekly cell should stop the cascade. Returns null
 // when the cascade should continue, or { stop_reason, flags } when it stops.
 // Pure function — no side effects, just reads the cell.
+//
+// Decision tree:
+//   1. Fatal/unknown flags → stop weekly_red_flag_fatal.
+//   2. Warning flags + weak candle → stop weekly_red_flag_warning_no_compensation.
+//   3. Score < (6 if strong-candle-in-bias else 7) → stop weekly_quality_low.
+//   4. Else → null (pass).
+//
+// The strong-candle compensation (floor 7 → 6) applies regardless of whether
+// warning flags are present — a strongly in-bias close is dominant evidence
+// of conviction.
 export function weeklyStopDecision(weekly) {
   if (!weekly) return null;
 
@@ -190,16 +201,14 @@ export function weeklyStopDecision(weekly) {
     return { stop_reason: "weekly_red_flag_fatal", flags: blocking };
   }
 
-  const score = weekly.score ?? 0;
-  let scoreFloor = STANDARD_WEEKLY_SCORE_FLOOR;
-
-  if (warning.length > 0) {
-    if (!isCandleStrongInBias(weekly)) {
-      return { stop_reason: "weekly_red_flag_warning_no_compensation", flags: warning };
-    }
-    // P8: warning + strong candle compensates for one score point (7 → 6).
-    scoreFloor = WARNING_COMPENSATED_WEEKLY_SCORE_FLOOR;
+  if (warning.length > 0 && !isCandleStrongInBias(weekly)) {
+    return { stop_reason: "weekly_red_flag_warning_no_compensation", flags: warning };
   }
+
+  const score = weekly.score ?? 0;
+  const scoreFloor = isCandleStrongInBias(weekly)
+    ? STRONG_CANDLE_WEEKLY_SCORE_FLOOR
+    : STANDARD_WEEKLY_SCORE_FLOOR;
 
   if (score < scoreFloor) {
     return { stop_reason: "weekly_quality_low", flags: [] };

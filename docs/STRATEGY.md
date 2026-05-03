@@ -183,7 +183,11 @@ context (`{MONTHLY_BIAS}`) and grades the chart AS that direction's setup.
      `pullback_present`, current closed bar color matches bias,
      `red_flags = []`.
    - `score = 7` allows exactly one of those four to be false; `red_flags`
-     must still be empty.
+     contains no fatal flags. Warning flags require the closed candle to
+     be strongly in bias.
+   - `score = 6` is allowed when the closed weekly candle is strongly in
+     bias (see §5.4) — the strong close compensates for one missing
+     rubric item, regardless of whether warning flags are present.
    - `score < 6` = reject.
 
 **Stop conditions (in order):** `direction_conflict` →
@@ -191,7 +195,8 @@ context (`{MONTHLY_BIAS}`) and grades the chart AS that direction's setup.
 fatal red flags → `weekly_red_flag_fatal`; warning red flags without a
 strongly in-bias close → `weekly_red_flag_warning_no_compensation`;
 `score < scoreFloor` → `weekly_quality_low` (where `scoreFloor` is 7 by
-default and 6 when warning + strongly in-bias candle compensates).
+default and 6 when the closed weekly candle is strongly in-bias —
+regardless of whether warning flags are present).
 (See §5.4 for the fatal vs. warning classification.)
 
 ### 4.3 Daily (`prompts/daily-trigger.md`)
@@ -307,10 +312,11 @@ After the consistency validator runs, weekly red flags are partitioned into **fa
 | `tangled_emas` | Warning |
 | (any unknown flag) | Treated as fatal (conservative default) |
 
-- **Fatal flags always stop the cascade** with `stop_reason = weekly_red_flag_fatal`.
-- **Warning flags allow `score = 6` or `score = 7` to pass** if the most recent closed weekly candle is strongly in bias — body ≥ 60%, close at extreme or upper-third (long) / lower-third (short), and color matches direction. Otherwise the cascade stops with `weekly_red_flag_warning_no_compensation` (warning + weak candle) or `weekly_quality_low` (no flags + `score < 7`, or warning + strong candle + `score < 6`).
+- **A strongly-in-bias closed weekly candle lowers the score floor from 7 to 6.** "Strongly in bias" means body ≥ 60%, close at extreme or upper-third (long) / lower-third (short), and color matches direction. The strong close is dominant evidence of conviction and offsets one missing rubric item. This applies whether or not warning flags are present.
+- **Warning flags still need the strong close.** Warning + weak candle stops at `weekly_red_flag_warning_no_compensation`. Warning + strong + `score < 6` stops at `weekly_quality_low`.
+- **Fatal flags always stop the cascade** with `stop_reason = weekly_red_flag_fatal`. The strong close cannot compensate.
 
-Trader rationale: warnings (chop, tight EMAs) are inherently context-dependent. A clean decisive in-bias close compensates for them — and a strongly in-bias close is itself a quality signal worth one rubric point, so the score floor relaxes from 7 to 6 for that path. Fatal flags (exhaustion candle, TF disagreement) are unambiguous structural breaks.
+Trader rationale: a strongly in-bias close is itself a quality signal — dominant evidence of conviction worth one rubric point — so the score floor relaxes from 7 to 6 whenever it's present. Warnings (chop, tight EMAs) are inherently context-dependent and require that strong close to clear; without it, the warning stops the cascade. Fatal flags (exhaustion candle, TF disagreement) are unambiguous structural breaks that cannot be compensated.
 
 ---
 
