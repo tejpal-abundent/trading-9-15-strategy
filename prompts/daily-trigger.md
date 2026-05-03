@@ -38,16 +38,24 @@ Return **pure JSON only**.
 
 ## Pass 1 — Measurements (extract these BEFORE forming any verdict)
 
-Locate the rightmost candle on the chart — that's the current/forming bar. The "most recent CLOSED candle" referenced throughout this prompt is the bar IMMEDIATELY TO ITS LEFT. Report the following raw observations.
+Locate the rightmost candle on the chart. If it is still forming, the "most recent CLOSED candle" is the bar IMMEDIATELY TO ITS LEFT. Otherwise the rightmost solid candle IS the current closed bar.
+
+**Anchor with OHLC.** The TradingView chart header (top-left of the canvas) shows `O / H / L / C` for the bar your cursor is hovering over. Hover over the bar you've identified as the current closed bar and copy its four numbers into `current_closed_bar.open/high/low/close`. Then compute body/wick/close_position FROM those numbers, not by eye. The four formulas are the same as the weekly prompt's Anchor section. **If the chart header disagrees with your visual estimate, trust the header.**
 
 ```json
 "measurements": {
   "prior_bar": {
     "color": "green" | "red",
     "body_pct_of_range": 0,
-    "high_relative_to_ema_band": "above" | "inside" | "below"
+    "high_relative_to_ema_band": "above" | "inside" | "below",
+    "bars_from_right": 2
   },
   "current_closed_bar": {
+    "open": 0.0,
+    "high": 0.0,
+    "low": 0.0,
+    "close": 0.0,
+    "bars_from_right": 1,
     "color": "green" | "red",
     "body_pct_of_range": 0,
     "upper_wick_pct": 0,

@@ -645,3 +645,162 @@ test("validateCellConsistency: cell with own direction takes priority over fallb
   // (red bar, upper wick 40, swept above prior high). Flag KEPT.
   assert.deepEqual(out.red_flags, ["exhaustion"]);
 });
+
+// ─── V2.2 OHLC anchor consistency ────────────────────────────────────────
+
+import { recomputeBarFromOhlc } from "../src/scanner.js";
+
+test("recomputeBarFromOhlc: USDCAD 2026-05-01 close — body 31, lower wick 54, mid", () => {
+  const out = recomputeBarFromOhlc({
+    open: 1.37001, high: 1.37394, low: 1.34818, close: 1.36197,
+  });
+  assert.equal(out.body_pct_of_range, 31);
+  assert.equal(out.upper_wick_pct, 15);
+  assert.equal(out.lower_wick_pct, 54);
+  assert.equal(out.close_position, "mid");
+  assert.equal(out.color, "red");
+});
+
+test("recomputeBarFromOhlc: solid bear close-at-low → body large, lower wick small, at_low", () => {
+  // Synthetic strong bear: open 1.37, high 1.371, low 1.355, close 1.356.
+  // Range 0.016, body 0.014 (87.5%), upper wick 0.001 (~6%), lower wick 0.001 (~6%).
+  const out = recomputeBarFromOhlc({
+    open: 1.370, high: 1.371, low: 1.355, close: 1.356,
+  });
+  assert.equal(out.body_pct_of_range, 88);
+  assert.equal(out.color, "red");
+  // close_position = (1.356 - 1.355) / 0.016 = 0.0625 → "lower_third"
+  assert.equal(out.close_position, "lower_third");
+});
+
+test("recomputeBarFromOhlc: returns null when OHLC missing", () => {
+  assert.equal(recomputeBarFromOhlc({}), null);
+  assert.equal(recomputeBarFromOhlc({ open: 1, high: 1, low: 1, close: 1 }), null);
+  assert.equal(recomputeBarFromOhlc(null), null);
+});
+
+test("recomputeBarFromOhlc: doji color when close === open", () => {
+  const out = recomputeBarFromOhlc({ open: 1.0, high: 1.05, low: 0.95, close: 1.0 });
+  assert.equal(out.color, "doji");
+});
+
+test("validateCellConsistency: OHLC drift > 5pp on body% gets recomputed + logged", () => {
+  // Model returned the right OHLC for USDCAD's actual close but claimed body
+  // was 70% (as if it had read a different, body-dominant bar). Validator
+  // should correct body% from OHLC and emit a log entry.
+  const cell = {
+    direction: "short",
+    measurements: {
+      ...mkMeasurements(),
+      current_closed_bar: {
+        open: 1.37001, high: 1.37394, low: 1.34818, close: 1.36197,
+        color: "red",
+        body_pct_of_range: 70,        // claim
+        upper_wick_pct: 10,            // claim
+        lower_wick_pct: 20,            // claim
+        close_position: "lower_third", // claim
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "below",
+      },
+    },
+    candle_verdict: { in_bias: true, body_pct_of_range: 70 },
+  };
+  const out = validateCellConsistency(cell, "short");
+  assert.equal(out.measurements.current_closed_bar.body_pct_of_range, 31);
+  assert.equal(out.measurements.current_closed_bar.lower_wick_pct, 54);
+  assert.equal(out.measurements.current_closed_bar.close_position, "mid");
+  assert.equal(out.candle_verdict.body_pct_of_range, 31);
+  assert.ok(out.consistency_log.some((l) => l.includes("body_pct_of_range")));
+  assert.ok(out.consistency_log.some((l) => l.includes("close_position")));
+});
+
+test("validateCellConsistency: OHLC matches reported (drift ≤ 5pp) → no recompute", () => {
+  const cell = {
+    direction: "short",
+    measurements: {
+      ...mkMeasurements(),
+      current_closed_bar: {
+        open: 1.37001, high: 1.37394, low: 1.34818, close: 1.36197,
+        color: "red",
+        body_pct_of_range: 33,        // computed=31, drift=2 → keep
+        upper_wick_pct: 17,            // computed=15, drift=2 → keep
+        lower_wick_pct: 50,            // computed=54, drift=4 → keep
+        close_position: "mid",         // matches
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "below",
+      },
+    },
+    candle_verdict: { in_bias: false },
+  };
+  const out = validateCellConsistency(cell, "short");
+  assert.equal(out.measurements.current_closed_bar.body_pct_of_range, 33);
+  assert.equal(out.measurements.current_closed_bar.lower_wick_pct, 50);
+  // No "recomputed current_closed_bar" entries should have been logged.
+  const recomputeLog = (out.consistency_log || []).filter((l) =>
+    l.includes("recomputed current_closed_bar"),
+  );
+  assert.equal(recomputeLog.length, 0);
+});
+
+test("validateCellConsistency: legacy cell with no OHLC passes through (back-compat)", () => {
+  const cell = {
+    direction: "long",
+    measurements: mkMeasurements(), // no open/high/low/close fields
+    candle_verdict: { in_bias: false },
+  };
+  const out = validateCellConsistency(cell, "long");
+  // body_pct_of_range still 50 (the legacy mkMeasurements default)
+  assert.equal(out.measurements.current_closed_bar.body_pct_of_range, 50);
+  // No OHLC-related log entries
+  const ohlcLog = (out.consistency_log || []).filter((l) => l.includes("from OHLC"));
+  assert.equal(ohlcLog.length, 0);
+});
+
+test("validateCellConsistency: OHLC corrects color when claim disagrees", () => {
+  // Model claimed green but OHLC says close < open (red).
+  const cell = {
+    measurements: {
+      ...mkMeasurements(),
+      current_closed_bar: {
+        open: 1.10, high: 1.11, low: 1.05, close: 1.06,
+        color: "green",                    // claim
+        body_pct_of_range: 67,             // ≈67 (matches computed)
+        upper_wick_pct: 17,
+        lower_wick_pct: 17,
+        close_position: "lower_third",
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "below",
+      },
+    },
+  };
+  const out = validateCellConsistency(cell);
+  assert.equal(out.measurements.current_closed_bar.color, "red");
+  assert.ok(out.consistency_log.some((l) => l.includes("color 'green'")));
+});
+
+test("validateCellConsistency: OHLC correction propagates into in_bias gate", () => {
+  // Reported body=70 (would pass in_bias gate's >= 40 check), but real body
+  // from OHLC is 31. After correction, gate should still pass since 31 < 40
+  // → in_bias forced to false.
+  const cell = {
+    direction: "short",
+    measurements: {
+      ...mkMeasurements(),
+      current_closed_bar: {
+        open: 1.37001, high: 1.37394, low: 1.34818, close: 1.36197,
+        color: "red",
+        body_pct_of_range: 70,             // claim
+        upper_wick_pct: 10,
+        lower_wick_pct: 20,
+        close_position: "lower_third",
+        high_vs_prior_bar_high: "above",
+        low_vs_prior_bar_low: "below",
+      },
+    },
+    candle_verdict: { in_bias: true, body_pct_of_range: 70 },
+  };
+  const out = validateCellConsistency(cell, "short");
+  // body% recomputed to 31 (< 40) → in_bias gate flips it to false.
+  assert.equal(out.candle_verdict.in_bias, false);
+  assert.equal(out.measurements.current_closed_bar.body_pct_of_range, 31);
+});

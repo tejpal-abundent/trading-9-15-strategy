@@ -36,16 +36,30 @@ Return **pure JSON only**.
 
 ## Pass 1 — Measurements (extract these BEFORE any verdict)
 
-Locate the rightmost candle on the chart — this is the current/forming bar. The "current closed bar" referenced below is the bar IMMEDIATELY TO ITS LEFT (the most recent CLOSED bar). Report the following raw observations. No interpretation — these numbers will gate every verdict you make in Pass 2.
+Locate the rightmost candle on the chart. If it is still forming (small body, partial range, or earlier in the week than Friday close), the "current closed bar" is the bar IMMEDIATELY TO ITS LEFT. Otherwise the rightmost solid candle IS the current closed bar.
+
+**Anchor with OHLC.** The TradingView chart header (top-left of the canvas) shows `O / H / L / C` for the bar your cursor is hovering over. Hover over the bar you've identified as the current closed bar and copy its four numbers into `current_closed_bar.open/high/low/close`. Then compute body/wick/close_position FROM those numbers, not by eye:
+- `body_pct_of_range` = round( |close − open| / (high − low) × 100 )
+- `upper_wick_pct` = round( (high − max(open, close)) / (high − low) × 100 )
+- `lower_wick_pct` = round( (min(open, close) − low) / (high − low) × 100 )
+- `close_position` bucket from (close − low) / (high − low): ≥0.95 = at_high, ≥0.66 = upper_third, ≥0.33 = mid, ≥0.05 = lower_third, else at_low (long-bias bucketing; symmetric for short)
+
+If the chart header values disagree with your visual estimate, **trust the header**. The header is the source of truth.
 
 ```json
 "measurements": {
   "prior_bar": {
     "color": "green" | "red",
     "body_pct_of_range": 0,
-    "high_relative_to_ema_band": "above" | "inside" | "below"
+    "high_relative_to_ema_band": "above" | "inside" | "below",
+    "bars_from_right": 2
   },
   "current_closed_bar": {
+    "open": 0.0,
+    "high": 0.0,
+    "low": 0.0,
+    "close": 0.0,
+    "bars_from_right": 1,
     "color": "green" | "red",
     "body_pct_of_range": 0,
     "upper_wick_pct": 0,
