@@ -190,8 +190,9 @@ context (`{MONTHLY_BIAS}`) and grades the chart AS that direction's setup.
 `monthly_weekly_disagree`; `direction === "none"` → `weekly_no_setup`;
 fatal red flags → `weekly_red_flag_fatal`; warning red flags without a
 strongly in-bias close → `weekly_red_flag_warning_no_compensation`;
-`score < 7` → `weekly_quality_low`. (See §5.4 for the fatal vs. warning
-classification.)
+`score < scoreFloor` → `weekly_quality_low` (where `scoreFloor` is 7 by
+default and 6 when warning + strongly in-bias candle compensates).
+(See §5.4 for the fatal vs. warning classification.)
 
 ### 4.3 Daily (`prompts/daily-trigger.md`)
 
@@ -307,9 +308,9 @@ After the consistency validator runs, weekly red flags are partitioned into **fa
 | (any unknown flag) | Treated as fatal (conservative default) |
 
 - **Fatal flags always stop the cascade** with `stop_reason = weekly_red_flag_fatal`.
-- **Warning flags allow `score = 7` to pass** if the most recent closed weekly candle is strongly in bias — body ≥ 60%, close at extreme or upper-third (long) / lower-third (short), and color matches direction. Otherwise the cascade stops with `weekly_red_flag_warning_no_compensation`.
+- **Warning flags allow `score = 6` or `score = 7` to pass** if the most recent closed weekly candle is strongly in bias — body ≥ 60%, close at extreme or upper-third (long) / lower-third (short), and color matches direction. Otherwise the cascade stops with `weekly_red_flag_warning_no_compensation` (warning + weak candle) or `weekly_quality_low` (no flags + `score < 7`, or warning + strong candle + `score < 6`).
 
-Trader rationale: warnings (chop, tight EMAs) are inherently context-dependent. A clean decisive in-bias close compensates for them. Fatal flags (exhaustion candle, TF disagreement) are unambiguous structural breaks.
+Trader rationale: warnings (chop, tight EMAs) are inherently context-dependent. A clean decisive in-bias close compensates for them — and a strongly in-bias close is itself a quality signal worth one rubric point, so the score floor relaxes from 7 to 6 for that path. Fatal flags (exhaustion candle, TF disagreement) are unambiguous structural breaks.
 
 ---
 

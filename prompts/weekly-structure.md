@@ -105,8 +105,8 @@ If `direction = "none"` or `direction_conflict = true`, fill the candle_verdict 
    - `score ≥ 8` requires ALL of: `angle_ok = true`, `ema_stack_ok = true`, `pullback_present = true`, `current_closed_bar.color = matches bias`, `red_flags = []`
    - `score = 7` allows exactly ONE of {`angle_ok`, `ema_stack_ok`, `pullback_present`, `current_closed_bar.color` matches bias} to be false. Red flags are evaluated as follows:
      - **Fatal red flags** (`exhaustion`, `direction_conflict`): score MUST drop below 7.
-     - **Warning red flags** (`choppy_structure`, `tangled_emas`): score 7 is allowed IF the candle is strongly in bias — `body_pct_of_range ≥ 60` AND `close_position ∈ {"at_high", "upper_third"}` (long) or `{"at_low", "lower_third"}` (short) AND `color` matches `direction`. Otherwise score MUST drop to 6 or below.
-   - `score < 6` = reject
+     - **Warning red flags** (`choppy_structure`, `tangled_emas`): score 6 OR 7 is allowed IF the candle is strongly in bias — `body_pct_of_range ≥ 60` AND `close_position ∈ {"at_high", "upper_third"}` (long) or `{"at_low", "lower_third"}` (short) AND `color` matches `direction`. Otherwise (warning flag with weak candle) score MUST drop to 5 or below.
+   - `score < 6` = reject (unless warning red flag with strongly-in-bias candle, in which case 6 is the floor)
 
 ### Step 4 — Candle Verdict (read the rightmost CLOSED weekly candle)
 

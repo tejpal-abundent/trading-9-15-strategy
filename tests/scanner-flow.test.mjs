@@ -547,9 +547,28 @@ test("weeklyStopDecision: warning flag + weak candle → weekly_red_flag_warning
   assert.equal(d?.stop_reason, "weekly_red_flag_warning_no_compensation");
 });
 
-test("weeklyStopDecision: warning + strong candle + score 6 → weekly_quality_low (score floor still applies)", () => {
+test("weeklyStopDecision: warning + strong candle + score 6 → null (P8 compensation)", () => {
   const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure"], score: 6 }));
+  assert.equal(d, null);
+});
+
+test("weeklyStopDecision: warning + strong candle + score 5 → weekly_quality_low (below P8 floor)", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: ["choppy_structure"], score: 5 }));
   assert.equal(d?.stop_reason, "weekly_quality_low");
+});
+
+test("weeklyStopDecision: no flags + score 6 → weekly_quality_low (no warning to compensate)", () => {
+  const d = weeklyStopDecision(mkWeekly({ red_flags: [], score: 6 }));
+  assert.equal(d?.stop_reason, "weekly_quality_low");
+});
+
+test("weeklyStopDecision: warning + weak candle + score 6 → weekly_red_flag_warning_no_compensation", () => {
+  const d = weeklyStopDecision(mkWeekly({
+    red_flags: ["choppy_structure"],
+    score: 6,
+    candle_verdict: { in_bias: false },
+  }));
+  assert.equal(d?.stop_reason, "weekly_red_flag_warning_no_compensation");
 });
 
 test("weeklyStopDecision: unknown flag treated as fatal", () => {

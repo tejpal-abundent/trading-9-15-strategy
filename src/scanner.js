@@ -31,6 +31,14 @@ const ENTER_WINNER_STRENGTH_THRESHOLD = 6;
 // ENTER threshold (6) — the HTF context already provides bias confidence.
 const WATCH_DOMINANT_WINNER_STRENGTH_THRESHOLD = 5;
 
+// Weekly quality score floors. STANDARD_WEEKLY_SCORE_FLOOR is the default minimum
+// for the cascade to continue past weekly. WARNING_COMPENSATED_WEEKLY_SCORE_FLOOR
+// applies when the cell has only warning red flags AND the candle is strongly
+// in-bias — the strong close offsets one missing rubric item beyond what
+// warning compensation already covered (score 7 → 6).
+const STANDARD_WEEKLY_SCORE_FLOOR = 7;
+const WARNING_COMPENSATED_WEEKLY_SCORE_FLOOR = 6;
+
 // P6: Red-flag classification.
 // Fatal flags always stop the cascade. Warning flags allow a score-7 cell
 // to pass IF the candle is strongly in-bias (see isCandleStrongInBias).
@@ -183,15 +191,17 @@ export function weeklyStopDecision(weekly) {
   }
 
   const score = weekly.score ?? 0;
+  let scoreFloor = STANDARD_WEEKLY_SCORE_FLOOR;
 
   if (warning.length > 0) {
     if (!isCandleStrongInBias(weekly)) {
       return { stop_reason: "weekly_red_flag_warning_no_compensation", flags: warning };
     }
-    // warning + strong candle: warnings tolerated, fall through to score check.
+    // P8: warning + strong candle compensates for one score point (7 → 6).
+    scoreFloor = WARNING_COMPENSATED_WEEKLY_SCORE_FLOOR;
   }
 
-  if (score < 7) {
+  if (score < scoreFloor) {
     return { stop_reason: "weekly_quality_low", flags: [] };
   }
 
