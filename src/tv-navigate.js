@@ -70,7 +70,7 @@ const SYMBOL_DESCRIPTION_TOKENS = {
   "OANDA:AUDJPY": [["AUDJPY"], ["AUD/JPY"], ["Australian Dollar", "Japanese Yen"]],
   "OANDA:CHFJPY": [["CHFJPY"], ["CHF/JPY"], ["Swiss Franc", "Japanese Yen"]],
   "OANDA:AUDNZD": [["AUDNZD"], ["AUD/NZD"], ["Australian Dollar", "New Zealand Dollar"]],
-  "OANDA:US30USD": [["US30"], ["Dow"], ["Wall Street"]],
+  "OANDA:US30USD": [["US30"], ["Dow"], ["Wall Street"], ["Wall St"]],
   "OANDA:DE30EUR": [["DE30"], ["DAX"], ["Germany"]],
   "OANDA:HK33HKD": [["HK33"], ["Hang Seng"], ["Hong Kong"]],
   // Indices / commodities (TVC)
