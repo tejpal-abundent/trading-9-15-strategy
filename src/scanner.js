@@ -146,6 +146,29 @@ export function computeSetupMatchCount(cell) {
   };
 }
 
+// P7: Calibration anomaly detector. Run at the end of a scan against the
+// final results array. Returns { topReason, topCount, total, dominance } when
+// ≥ 90% of stops collapsed to one reason on a watchlist of ≥ 5 with no
+// candidates. Returns null otherwise. Pure function.
+export function detectCalibrationAnomaly(results) {
+  if (!Array.isArray(results) || results.length < 5) return null;
+  if (results.some((r) => r.confluence_grade && r.confluence_grade !== "—")) return null;
+
+  const stopCounts = {};
+  for (const r of results) {
+    if (!r.stop_reason) continue;
+    stopCounts[r.stop_reason] = (stopCounts[r.stop_reason] || 0) + 1;
+  }
+  const total = Object.values(stopCounts).reduce((a, b) => a + b, 0);
+  if (total === 0) return null;
+
+  const sorted = Object.entries(stopCounts).sort((a, b) => b[1] - a[1]);
+  const [topReason, topCount] = sorted[0];
+  const dominance = topCount / total;
+  if (dominance < 0.9) return null;
+  return { topReason, topCount, total, dominance };
+}
+
 // P6: Decides whether a weekly cell should stop the cascade. Returns null
 // when the cascade should continue, or { stop_reason, flags } when it stops.
 // Pure function — no side effects, just reads the cell.
@@ -1759,6 +1782,17 @@ export async function runScanV2(options = {}) {
 
   const totalCost = results.reduce((sum, r) => sum + (r.cost_usd ?? 0), 0);
   console.log(`\n  Total LLM cost: $${totalCost.toFixed(4)}`);
+
+  // P7: Calibration anomaly check.
+  const anomaly = detectCalibrationAnomaly(results);
+  if (anomaly) {
+    console.log("\n  ⚠️  CALIBRATION WARNING");
+    console.log(
+      `     ${anomaly.topCount}/${anomaly.total} symbols stopped at "${anomaly.topReason}" ` +
+        `(${(anomaly.dominance * 100).toFixed(0)}%).`,
+    );
+    console.log("     This is unusual — consider reviewing gate thresholds in src/scanner.js.");
+  }
 
   const payload = {
     started_at: startedAt,
