@@ -12,6 +12,9 @@ import {
   formatCapturedAtForPrompt,
   getChartState,
   dismissPopups,
+  readRenderedSymbol,
+  verifyRenderedMatchesExpected,
+  ChartSymbolSwitchFailedError,
 } from "./tv-navigate.js";
 import { askGeminiVision, getTodaysCost, recordCost, fillRubric } from "./visual.js";
 import { fetchCandles, emaAlignment, agree } from "./higher-tf.js";
@@ -603,6 +606,38 @@ async function evaluateLtfCell(client, item, tf, htfBias, rubric) {
   return cell;
 }
 
+// Belt-to-suspenders check that the chart canvas is actually rendering the
+// expected TV symbol after setSymbol() returns. Throws
+// ChartSymbolSwitchFailedError if the legend disagrees, after one retry.
+// Used by the per-symbol loop callers to surface a clear failure indicator
+// in the report card rather than feeding a wrong screenshot to the LLM.
+async function assertChartRenderingExpected(client, expectedTvSymbol) {
+  const rendered = await readRenderedSymbol(client);
+  const v = rendered
+    ? verifyRenderedMatchesExpected(rendered, expectedTvSymbol)
+    : { ok: false, reason: "no_legend" };
+  if (v.ok) return;
+
+  console.log(
+    `      [pre-flight: rendered chart does not match expected ${expectedTvSymbol} — ${v.reason}; retrying once]`,
+  );
+  await setSymbol(client, expectedTvSymbol);
+  const rendered2 = await readRenderedSymbol(client);
+  const v2 = rendered2
+    ? verifyRenderedMatchesExpected(rendered2, expectedTvSymbol)
+    : { ok: false, reason: "no_legend" };
+  if (v2.ok) return;
+
+  throw new ChartSymbolSwitchFailedError({
+    requested: expectedTvSymbol,
+    rendered: rendered2
+      ? `${rendered2.description || "<none>"} (${rendered2.exchange || "<none>"})`
+      : "<no_legend>",
+    attempts: 2,
+    message: `chart_switch_failed at pre-flight: ${v2.reason}`,
+  });
+}
+
 // Single-symbol pipeline. Drives HTF chain → numeric cross-check → LTF chain.
 // Returns the full result object matching the spec schema.
 async function evaluateSymbol(client, item, htfRubric, ltfRubric, opts = {}) {
@@ -629,6 +664,12 @@ async function evaluateSymbol(client, item, htfRubric, ltfRubric, opts = {}) {
 
   await setSymbol(client, item.tv_symbol);
   await dismissPopups(client);
+
+  // Pre-flight rendered-symbol check. setSymbol already verifies the chart
+  // canvas matches the request, but this is the belt to its suspenders so
+  // any drift between symbol-switch and the first TF capture is caught
+  // immediately rather than after we've spent LLM tokens on a wrong chart.
+  await assertChartRenderingExpected(client, item.tv_symbol);
 
   // HTF chain (sequential, fail-fast)
   for (const tf of HTF_TIMEFRAMES) {
@@ -1394,6 +1435,9 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
   await setSymbol(client, item.tv_symbol);
   await dismissPopups(client);
 
+  // Pre-flight rendered-symbol check. See evaluateSymbol() for rationale.
+  await assertChartRenderingExpected(client, item.tv_symbol);
+
   // ─── Step 1: Monthly ───────────────────────────────────────────────────
   log("    Monthly ...");
   result.monthly = await evaluateMonthlyCell(
@@ -1636,6 +1680,24 @@ export async function runScan(options = {}) {
         const r = await evaluateSymbol(client, item, htfRubric, ltfRubric, { verbose: true, htfOnly });
         results.push(r);
       } catch (err) {
+        if (err instanceof ChartSymbolSwitchFailedError) {
+          console.log(
+            `    🚫 SKIP: chart_switch_failed (rendered=${err.rendered}, expected=${err.requested})`,
+          );
+          results.push({
+            symbol: item.label,
+            tv_symbol: item.tv_symbol,
+            stopped_at: null,
+            stop_reason: `chart_switch_failed (rendered=${err.rendered})`,
+            htf_cells: [],
+            htf_bias: null,
+            ltf_cells: [],
+            watching: [],
+            triggers: [],
+            cost_usd: 0,
+          });
+          continue;
+        }
         console.log(`    ❌ ${err.message}`);
         results.push({
           symbol: item.label,
@@ -1760,6 +1822,24 @@ export async function runScanV2(options = {}) {
         });
         results.push(r);
       } catch (err) {
+        if (err instanceof ChartSymbolSwitchFailedError) {
+          console.log(
+            `    🚫 SKIP: chart_switch_failed (rendered=${err.rendered}, expected=${err.requested})`,
+          );
+          results.push({
+            symbol: item.label,
+            tv_symbol: item.tv_symbol,
+            stopped_at: null,
+            stop_reason: `chart_switch_failed (rendered=${err.rendered})`,
+            monthly: null,
+            weekly: null,
+            daily: null,
+            confluence_grade: "—",
+            cost_usd: 0,
+            pipeline: "v2-mtf-candle-verdict",
+          });
+          continue;
+        }
         console.log(`    ❌ ${err.message}`);
         results.push({
           symbol: item.label,

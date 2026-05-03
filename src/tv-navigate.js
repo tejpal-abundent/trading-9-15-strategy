@@ -11,6 +11,99 @@ import { execSync } from "child_process";
 
 const CDP_PORT = 9222;
 
+// Hard-fail error type thrown when the chart canvas does NOT actually render
+// the symbol we asked for. Surfaces the rendered-vs-expected drift the widget
+// API silently hides (chart.symbol() and chart.symbolExt() both report the
+// requested symbol even after a failed silent switch — the chart canvas keeps
+// the previous symbol's bars visible). The scanner catches this and skips
+// the symbol with a clear `chart_switch_failed` reason rather than feeding
+// a stale chart to the LLM.
+export class ChartSymbolSwitchFailedError extends Error {
+  constructor({ requested, rendered, attempts, message }) {
+    super(
+      message ||
+        `chart_switch_failed: requested=${requested} rendered=${
+          rendered || "<unknown>"
+        } attempts=${attempts}`,
+    );
+    this.name = "ChartSymbolSwitchFailedError";
+    this.requested = requested;
+    this.rendered = rendered;
+    this.attempts = attempts;
+  }
+}
+
+// Description tokens we expect to see in the chart legend for each watchlist
+// symbol. The legend's first non-icon line is either the symbol description
+// (e.g. "Apple Inc", "EUR/USD", "Bitcoin / TetherUS") or the pro_name format
+// (e.g. "NASDAQ:AAPL") depending on TV state. Any of the listed tokens is
+// considered a match, case-insensitive substring. Used as the second AND
+// signal alongside exchange match in verifyRenderedMatchesExpected().
+const SYMBOL_DESCRIPTION_TOKENS = {
+  // Crypto (BINANCE)
+  "BINANCE:BTCUSDT": ["BTCUSDT", "Bitcoin"],
+  "BINANCE:ETHUSDT": ["ETHUSDT", "Ethereum"],
+  "BINANCE:SOLUSDT": ["SOLUSDT", "Solana"],
+  // Forex / metals (OANDA)
+  "OANDA:XAUUSD": ["XAUUSD", "Gold", "XAU/USD"],
+  "OANDA:EURUSD": ["EURUSD", "EUR/USD", "Euro"],
+  "OANDA:GBPUSD": ["GBPUSD", "GBP/USD", "British Pound"],
+  "OANDA:USDJPY": ["USDJPY", "USD/JPY", "Japanese Yen"],
+  "OANDA:USDCHF": ["USDCHF", "USD/CHF", "Swiss Franc"],
+  "OANDA:AUDUSD": ["AUDUSD", "AUD/USD", "Australian Dollar"],
+  "OANDA:USDCAD": ["USDCAD", "USD/CAD", "Canadian Dollar"],
+  "OANDA:NZDUSD": ["NZDUSD", "NZD/USD", "New Zealand"],
+  "OANDA:EURJPY": ["EURJPY", "EUR/JPY"],
+  "OANDA:GBPJPY": ["GBPJPY", "GBP/JPY"],
+  "OANDA:GBPAUD": ["GBPAUD", "GBP/AUD"],
+  "OANDA:EURCHF": ["EURCHF", "EUR/CHF"],
+  "OANDA:EURCAD": ["EURCAD", "EUR/CAD"],
+  "OANDA:EURGBP": ["EURGBP", "EUR/GBP"],
+  "OANDA:EURAUD": ["EURAUD", "EUR/AUD"],
+  "OANDA:AUDJPY": ["AUDJPY", "AUD/JPY"],
+  "OANDA:CHFJPY": ["CHFJPY", "CHF/JPY"],
+  "OANDA:AUDNZD": ["AUDNZD", "AUD/NZD"],
+  "OANDA:US30USD": ["US30", "Dow", "US Wall Street"],
+  "OANDA:DE30EUR": ["DE30", "Germany", "DAX"],
+  "OANDA:HK33HKD": ["HK33", "Hong Kong", "Hang Seng"],
+  // Indices / commodities (TVC)
+  "TVC:USOIL": ["USOIL", "WTI", "CRUDE OIL", "Crude Oil"],
+  // Equities (NASDAQ — TV may render via BATS sibling listing)
+  "NASDAQ:TSLA": ["TSLA", "Tesla"],
+  "NASDAQ:AAPL": ["AAPL", "Apple"],
+};
+
+// Exchange families. TV may report a sibling listing on a different exchange
+// for an equity (e.g. NASDAQ:TSLA gets reported by the chart legend as
+// "BATS"); both are considered the same family. For forex/crypto TV uses the
+// exchange we asked for verbatim. Keys and values normalized to upper case.
+const EXCHANGE_ALIASES = {
+  NASDAQ: ["NASDAQ", "BATS", "NYSE", "AMEX"],
+  BATS: ["BATS", "NASDAQ", "NYSE", "AMEX"],
+  NYSE: ["NYSE", "NASDAQ", "BATS", "AMEX"],
+  OANDA: ["OANDA"],
+  BINANCE: ["BINANCE"],
+  TVC: ["TVC", "OANDA", "FX"],
+  FX: ["FX", "OANDA"],
+};
+
+function exchangesMatch(expected, rendered) {
+  if (!expected || !rendered) return false;
+  const e = expected.toUpperCase();
+  const r = rendered.toUpperCase();
+  if (e === r) return true;
+  const aliases = EXCHANGE_ALIASES[e];
+  if (aliases) {
+    for (const a of aliases) {
+      if (a.toUpperCase() === r) return true;
+    }
+  }
+  return false;
+}
+
+// Inverse of exchangesMatch's lookup — for symbols not in our aliases map,
+// require an exact exchange-token match in the legend.
+
 // Activate the TradingView Desktop macOS app so it's the frontmost OS window.
 // Without this, the OS throttles GPU paints for background apps and our
 // CDP screenshots return stale frames even though setResolution succeeded.
@@ -141,23 +234,124 @@ export async function dismissPopups(client) {
   await sleep(200);
 }
 
-// Switch chart to {tvSymbol} using TradingView's exposed widget API. Same
-// approach as the official MCP server. Bypasses all keyboard/UI flakiness.
-export async function setSymbol(client, tvSymbol) {
-  await dismissPopups(client);
-
-  // Skip the symbol switch entirely if the chart is already on this symbol —
-  // calling setSymbol on the same symbol triggers TV to reload the data feed
-  // AND silently revert the timeframe to the user's last view, which then
-  // races with the next setResolution() call.
-  const { result: cur } = await client.Runtime.evaluate({
-    expression: `(function() { try { return ${CHART_API}.symbol(); } catch (e) { return null; } })()`,
+// Read the symbol *actually being rendered* on the chart canvas, NOT the
+// requested symbol. Source-of-truth: the chart legend DOM
+// (`legendMainSourceWrapper`).
+//
+// Why not chart.symbol() / chart.symbolExt()? Live evidence (tools/diag-switch.mjs):
+// after a silent setSymbol failure the widget API reports the *requested*
+// symbol — `chart.symbol()` returns "OANDA:EURUSD" and `chart.symbolExt()`
+// returns `{ pro_name: "OANDA:EURUSD", description: "EUR/USD", exchange: "OANDA" }`
+// even while the chart canvas keeps rendering Apple bars. Only the legend DOM
+// updates from the rendered canvas data.
+//
+// Returns: { description, exchange, raw }. `raw` is the full legend text for
+// debugging.
+export async function readRenderedSymbol(client) {
+  const { result } = await client.Runtime.evaluate({
+    expression: `
+      (function () {
+        var legend = document.querySelector('[class*="legendMainSourceWrapper"]');
+        if (!legend) return null;
+        var raw = (legend.innerText || legend.textContent || '').trim();
+        if (!raw) return null;
+        var lines = raw.split(/\\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+        // Lines often look like: ["A", "Apple Inc", "1M", "NASDAQ", "O", "278.86", ...]
+        // The first line ("A" / "B" / etc.) is a single-letter dataset icon —
+        // skip lines that are <=2 chars. The first long line is the description
+        // (or the pro_name "NASDAQ:AAPL" form when the description hasn't
+        // populated yet). The exchange line is one of the all-caps lines
+        // appearing AFTER the timeframe line (matches the upper-case exchange
+        // token: OANDA / NASDAQ / BINANCE / TVC / BATS / FX / NYSE / AMEX / Cboe One).
+        var description = null;
+        var exchange = null;
+        var tfRegex = /^(\\d+(s|m|h)|[1-9][0-9]*[DWM]|[DWM])$/;
+        // Known exchange tokens we accept on a legend exchange line.
+        var EXCHANGES = ['OANDA','NASDAQ','BINANCE','TVC','BATS','NYSE','AMEX','FX','COINBASE','BITSTAMP','KRAKEN','CBOE'];
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i];
+          if (!description && line.length > 2 && !tfRegex.test(line) && !/^[A-Z]$/.test(line) && !/^[OHLCV]$/i.test(line)) {
+            description = line;
+            continue;
+          }
+          if (!exchange) {
+            // Match all-caps short token, or a string starting with one of
+            // the known exchange tokens.
+            var upper = line.toUpperCase();
+            for (var j = 0; j < EXCHANGES.length; j++) {
+              if (upper === EXCHANGES[j] || upper.indexOf(EXCHANGES[j]) === 0) {
+                exchange = EXCHANGES[j];
+                break;
+              }
+            }
+            // Description sometimes looks like "NASDAQ:AAPL" (pro_name form).
+            // In that case the first colon-separated token IS the exchange.
+            if (!exchange && description && description.indexOf(':') !== -1) {
+              var head = description.split(':')[0].toUpperCase();
+              for (var k = 0; k < EXCHANGES.length; k++) {
+                if (head === EXCHANGES[k]) { exchange = head; break; }
+              }
+            }
+          }
+          if (description && exchange) break;
+        }
+        return JSON.stringify({ description: description, exchange: exchange, raw: raw.slice(0, 500) });
+      })()
+    `,
     returnByValue: true,
   }).catch(() => ({ result: { value: null } }));
-  if (cur.value && cur.value.toUpperCase() === tvSymbol.toUpperCase()) {
-    return;
+  if (!result.value) return null;
+  try {
+    return JSON.parse(result.value);
+  } catch {
+    return null;
+  }
+}
+
+// Decide whether the rendered chart matches the requested TV symbol.
+// Two independent signals, AND-ed together:
+//   1. Exchange family match (OANDA == OANDA, NASDAQ == BATS, etc.)
+//   2. Description / ticker token match (legend description contains one of
+//      the SYMBOL_DESCRIPTION_TOKENS entries for this expectedTvSymbol — or,
+//      if the symbol isn't in the table, falls back to the raw ticker letters)
+// Returns { ok: bool, reason: string } so callers can log a precise diagnosis.
+export function verifyRenderedMatchesExpected(rendered, expectedTvSymbol) {
+  if (!rendered) return { ok: false, reason: "no_legend" };
+  if (!rendered.description) return { ok: false, reason: "no_description" };
+
+  const colonIdx = expectedTvSymbol.indexOf(":");
+  const expectedExchange =
+    colonIdx > 0 ? expectedTvSymbol.slice(0, colonIdx).toUpperCase() : null;
+  const expectedTicker =
+    colonIdx > 0 ? expectedTvSymbol.slice(colonIdx + 1) : expectedTvSymbol;
+
+  // Exchange check
+  if (expectedExchange) {
+    if (!exchangesMatch(expectedExchange, rendered.exchange || "")) {
+      return {
+        ok: false,
+        reason: `exchange_mismatch (expected=${expectedExchange} rendered=${rendered.exchange || "<none>"})`,
+      };
+    }
   }
 
+  // Description / ticker check
+  const descUpper = (rendered.description || "").toUpperCase();
+  const tokens = SYMBOL_DESCRIPTION_TOKENS[expectedTvSymbol] || [
+    expectedTicker,
+  ];
+  const hit = tokens.some((tok) => descUpper.includes(tok.toUpperCase()));
+  if (!hit) {
+    return {
+      ok: false,
+      reason: `description_mismatch (expected one of [${tokens.join(", ")}], rendered="${rendered.description}")`,
+    };
+  }
+  return { ok: true, reason: "match" };
+}
+
+// Internal: ask the widget API to switch to tvSymbol. Returns parsed result.
+async function callSetSymbolApi(client, tvSymbol) {
   const { result } = await client.Runtime.evaluate({
     expression: `
       (function() {
@@ -175,30 +369,122 @@ export async function setSymbol(client, tvSymbol) {
     `,
     returnByValue: true,
   });
-  const r = JSON.parse(result.value);
-  if (!r.ok) {
-    throw new Error(
-      `setSymbol failed for ${tvSymbol}: ${r.reason}`,
-    );
+  return JSON.parse(result.value);
+}
+
+// Wait until the legend reports a description matching `expectedTvSymbol`.
+// Returns { ok, rendered }.
+async function waitForRenderedSymbol(client, expectedTvSymbol, maxWaitMs = 8000) {
+  const deadline = Date.now() + maxWaitMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const rendered = await readRenderedSymbol(client);
+    last = rendered;
+    if (rendered) {
+      const v = verifyRenderedMatchesExpected(rendered, expectedTvSymbol);
+      if (v.ok) return { ok: true, rendered };
+    }
+    await sleep(300);
   }
+  return { ok: false, rendered: last };
+}
 
-  // Hard wait for chart's data feed to load new symbol — without this,
-  // subsequent setResolution() calls get silently dropped.
-  await waitForChartReady(client);
-  await sleep(3000); // extra settle — spinner check alone is insufficient
-
-  // Verify by reading current symbol back
-  const { result: verify } = await client.Runtime.evaluate({
-    expression: `(function() { try { return ${CHART_API}.symbol(); } catch (e) { return null; } })()`,
-    returnByValue: true,
-  });
-  if (verify.value && verify.value.toUpperCase() !== tvSymbol.toUpperCase()) {
-    console.log(
-      `      [warn: setSymbol asked '${tvSymbol}', chart reports '${verify.value}']`,
-    );
-  }
-
+// Switch chart to {tvSymbol} using TradingView's exposed widget API. Same
+// approach as the official MCP server. Bypasses all keyboard/UI flakiness.
+//
+// CRITICAL: this verifies the chart canvas ACTUALLY rendered the requested
+// symbol via readRenderedSymbol(), NOT the lying chart.symbol() API. If the
+// rendered legend disagrees, retry up to 2 more attempts (re-call setSymbol
+// then a Page.reload + setSymbol). If still wrong, throw
+// ChartSymbolSwitchFailedError so callers can skip the symbol cleanly.
+export async function setSymbol(client, tvSymbol) {
   await dismissPopups(client);
+
+  // Fast-path: skip the switch if the chart is ALREADY rendering tvSymbol.
+  // Uses the truthful legend DOM, not chart.symbol(). Avoids redundant data-
+  // feed reloads that race with subsequent setResolution() calls.
+  const renderedNow = await readRenderedSymbol(client);
+  if (renderedNow) {
+    const v = verifyRenderedMatchesExpected(renderedNow, tvSymbol);
+    if (v.ok) {
+      // Also confirm chart.symbol() reports the same — defensive against the
+      // very-rare case the legend matches but the widget API hasn't updated.
+      const { result: cur } = await client.Runtime.evaluate({
+        expression: `(function() { try { return ${CHART_API}.symbol(); } catch (e) { return null; } })()`,
+        returnByValue: true,
+      }).catch(() => ({ result: { value: null } }));
+      if (
+        cur.value &&
+        cur.value.toUpperCase() === tvSymbol.toUpperCase()
+      ) {
+        return;
+      }
+    }
+  }
+
+  const MAX_ATTEMPTS = 3;
+  let lastRendered = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // Strategy escalates with attempt #
+    if (attempt === 1) {
+      // Plain widget setSymbol
+      const r = await callSetSymbolApi(client, tvSymbol);
+      if (!r.ok) {
+        // API itself failed — retry the same call once before escalating
+        await sleep(500);
+        await callSetSymbolApi(client, tvSymbol);
+      }
+    } else if (attempt === 2) {
+      // Toggle through a different symbol then back. TV's data feed sometimes
+      // refuses to re-load the same chart, but a forced symbol cycle clears
+      // the lock.
+      console.log(
+        `      [setSymbol: attempt ${attempt}/${MAX_ATTEMPTS} — cycling via OANDA:EURUSD then back to ${tvSymbol}]`,
+      );
+      await callSetSymbolApi(
+        client,
+        tvSymbol === "OANDA:EURUSD" ? "BINANCE:BTCUSDT" : "OANDA:EURUSD",
+      );
+      await sleep(1500);
+      await callSetSymbolApi(client, tvSymbol);
+    } else {
+      // Last resort — reload the page. Heavy hammer but recovers from the
+      // hard-stuck state where TV's data feed is locked.
+      console.log(
+        `      [setSymbol: attempt ${attempt}/${MAX_ATTEMPTS} — Page.reload as last-resort recovery]`,
+      );
+      await client.Page.reload({}).catch(() => {});
+      await sleep(8000); // wait for page to come back up
+      await waitForChartReady(client, 12000);
+      await callSetSymbolApi(client, tvSymbol);
+    }
+
+    // Hard wait for chart's data feed to load new symbol — without this,
+    // subsequent setResolution() calls get silently dropped.
+    await waitForChartReady(client);
+    await sleep(2000);
+
+    // Truthful verification — read the rendered legend, not chart.symbol().
+    const { ok, rendered } = await waitForRenderedSymbol(client, tvSymbol, 6000);
+    lastRendered = rendered;
+    if (ok) {
+      await dismissPopups(client);
+      return;
+    }
+    console.log(
+      `      [setSymbol: attempt ${attempt}/${MAX_ATTEMPTS} — rendered legend still '${
+        rendered?.description || "<none>"
+      }' / '${rendered?.exchange || "<none>"}', expected ${tvSymbol}]`,
+    );
+  }
+
+  throw new ChartSymbolSwitchFailedError({
+    requested: tvSymbol,
+    rendered: lastRendered
+      ? `${lastRendered.description || "<none>"} (${lastRendered.exchange || "<none>"})`
+      : "<no_legend>",
+    attempts: MAX_ATTEMPTS,
+  });
 }
 
 // Map our TF labels → the value passed to chart.setResolution().
@@ -369,17 +655,23 @@ export async function captureSymbolTf(
 
   await dismissPopups(client);
 
-  // Defensive: if the user clicked a different symbol while we were scanning,
-  // re-set the symbol back to what this cell expects.
+  // Defensive: verify the chart is ACTUALLY rendering the expected symbol.
+  // We deliberately use the legend DOM (readRenderedSymbol) and NOT
+  // chart.symbol() — the widget API lies after a silent setSymbol failure
+  // (reports the requested symbol while the canvas keeps the previous
+  // symbol's bars visible). If the rendered legend disagrees, attempt a
+  // re-set; if still wrong, throw ChartSymbolSwitchFailedError so the
+  // scanner can skip cleanly rather than feed a wrong screenshot to the LLM.
   if (expectedSymbol) {
-    const { result: cur } = await client.Runtime.evaluate({
-      expression: `(function() { try { return ${CHART_API}.symbol(); } catch (e) { return null; } })()`,
-      returnByValue: true,
-    }).catch(() => ({ result: { value: null } }));
-    if (cur.value && cur.value.toUpperCase() !== expectedSymbol.toUpperCase()) {
+    const rendered = await readRenderedSymbol(client);
+    const v = rendered
+      ? verifyRenderedMatchesExpected(rendered, expectedSymbol)
+      : { ok: false, reason: "no_legend" };
+    if (!v.ok) {
       console.log(
-        `      [capture: symbol drifted to '${cur.value}', expected ${expectedSymbol} — re-setting]`,
+        `      [capture: rendered chart does not match expected ${expectedSymbol} — ${v.reason}; re-setting]`,
       );
+      // setSymbol now hard-fails on persistent drift; let the error propagate.
       await setSymbol(client, expectedSymbol);
       await setTimeframe(client, timeframe);
     }
@@ -423,6 +715,29 @@ export async function captureSymbolTf(
 
   // Extra settle time so candles fully render before capture
   await sleep(1000);
+
+  // FINAL GATE — last-mile rendered-symbol check immediately before the
+  // screenshot. After all the focus-toggling, popup-dismissing, and
+  // mouseMove canvas-invalidation above there is still a small window where
+  // the chart could have drifted (e.g., a popup re-routed focus, or the
+  // user clicked a different watchlist row). Hard-fail if so.
+  if (expectedSymbol) {
+    const rendered = await readRenderedSymbol(client);
+    const v = rendered
+      ? verifyRenderedMatchesExpected(rendered, expectedSymbol)
+      : { ok: false, reason: "no_legend" };
+    if (!v.ok) {
+      throw new ChartSymbolSwitchFailedError({
+        requested: expectedSymbol,
+        rendered: rendered
+          ? `${rendered.description || "<none>"} (${rendered.exchange || "<none>"})`
+          : "<no_legend>",
+        attempts: 1,
+        message: `chart_switch_failed at screenshot gate: ${v.reason} — refusing to save stale chart for ${expectedSymbol}`,
+      });
+    }
+  }
+
   const capturedAt = new Date();
   const stamp = capturedAt
     .toISOString()
