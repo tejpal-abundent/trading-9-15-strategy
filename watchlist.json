@@ -14,5 +14,16 @@
   { "label": "GBPJPY",  "tv_symbol": "OANDA:GBPJPY",    "binance_symbol": null },
   { "label": "GBPAUD",  "tv_symbol": "OANDA:GBPAUD",    "binance_symbol": null },
   { "label": "EURCHF",  "tv_symbol": "OANDA:EURCHF",    "binance_symbol": null },
-  { "label": "USOIL",   "tv_symbol": "TVC:USOIL",       "binance_symbol": null }
+  { "label": "EURCAD",  "tv_symbol": "OANDA:EURCAD",    "binance_symbol": null },
+  { "label": "EURGBP",  "tv_symbol": "OANDA:EURGBP",    "binance_symbol": null },
+  { "label": "EURAUD",  "tv_symbol": "OANDA:EURAUD",    "binance_symbol": null },
+  { "label": "AUDJPY",  "tv_symbol": "OANDA:AUDJPY",    "binance_symbol": null },
+  { "label": "CHFJPY",  "tv_symbol": "OANDA:CHFJPY",    "binance_symbol": null },
+  { "label": "AUDNZD",  "tv_symbol": "OANDA:AUDNZD",    "binance_symbol": null },
+  { "label": "USOIL",   "tv_symbol": "TVC:USOIL",       "binance_symbol": null },
+  { "label": "US30",    "tv_symbol": "OANDA:US30USD",   "binance_symbol": null },
+  { "label": "GER40",   "tv_symbol": "OANDA:DE30EUR",   "binance_symbol": null },
+  { "label": "HK50",    "tv_symbol": "OANDA:HK33HKD",   "binance_symbol": null },
+  { "label": "TSLA",    "tv_symbol": "NASDAQ:TSLA",     "binance_symbol": null },
+  { "label": "AAPL",    "tv_symbol": "NASDAQ:AAPL",     "binance_symbol": null }
 ]
