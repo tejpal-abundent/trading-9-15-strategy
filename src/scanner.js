@@ -67,9 +67,9 @@ export function ltfCellState(cell) {
 //   NONE  — direction_conflict OR red_flags present OR prep_signals_count < 2
 //           OR missing candle_verdict
 //   WATCH — prep ready but the trigger candle doesn't confirm yet
-//           (candle_verdict.in_bias === false OR winner_strength < 7)
+//           (candle_verdict.in_bias === false OR winner_strength < ENTER_WINNER_STRENGTH_THRESHOLD)
 //   ENTER — prep ready AND candle_verdict.in_bias === true
-//           AND winner_strength >= 7 (decisive close in bias direction)
+//           AND winner_strength >= ENTER_WINNER_STRENGTH_THRESHOLD (decisive close in bias direction)
 //
 // Authoritative in code — if the prompt's self-reported state disagrees, the
 // scanner trusts this computation.

@@ -319,7 +319,7 @@ test("dailyCellState: prep ready but candle_verdict.in_bias=false → WATCH", ()
   assert.equal(dailyCellState(cell), "WATCH");
 });
 
-test("dailyCellState: prep ready, in_bias=true but winner_strength < 7 → WATCH", () => {
+test("dailyCellState: prep ready, in_bias=true but winner_strength=5 → WATCH", () => {
   const cell = {
     direction_conflict: false,
     prep_signals_count: 3,
