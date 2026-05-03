@@ -637,3 +637,57 @@ test("dailyCellState: trend-dominant + prep=2 + in_bias + strength 6 → ENTER (
   });
   assert.equal(dailyCellState(cell, mkMonthlyDominant(), mkWeeklyDominant()), "ENTER");
 });
+
+// ─── P4: dailyCellState consults computeSetupMatchCount for ENTER ────────
+
+test("dailyCellState: pullback ENTER passes when both required signals true", () => {
+  const cell = mkDailyCell({
+    setup_type: "pullback",
+    angle_ok: true,
+    zone_rejection: true,
+    solid_continuation: false,
+    coc_present: false,
+    prep_signals_count: 2,
+    candle_verdict: { in_bias: true, winner_strength: 7, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "ENTER");
+});
+
+test("dailyCellState: pullback ENTER blocked when required zone_rejection missing → WATCH", () => {
+  const cell = mkDailyCell({
+    setup_type: "pullback",
+    angle_ok: true,
+    zone_rejection: false,
+    solid_continuation: true,
+    coc_present: false,
+    prep_signals_count: 2,
+    candle_verdict: { in_bias: true, winner_strength: 7 },
+  });
+  assert.equal(dailyCellState(cell), "WATCH");
+});
+
+test("dailyCellState: continuation ENTER passes when solid_continuation + angle_ok true", () => {
+  const cell = mkDailyCell({
+    setup_type: "continuation",
+    angle_ok: true,
+    zone_rejection: false,
+    solid_continuation: true,
+    coc_present: false,
+    prep_signals_count: 2,
+    candle_verdict: { in_bias: true, winner_strength: 7, pattern: "solid_bull", liquidity_swept: "none" },
+  });
+  assert.equal(dailyCellState(cell), "ENTER");
+});
+
+test("dailyCellState: setup_type=none falls back to legacy prep ≥ 2 floor", () => {
+  const cell = mkDailyCell({
+    setup_type: "none",
+    angle_ok: true,
+    zone_rejection: true,
+    solid_continuation: false,
+    coc_present: false,
+    prep_signals_count: 2,
+    candle_verdict: { in_bias: true, winner_strength: 7 },
+  });
+  assert.equal(dailyCellState(cell), "ENTER");
+});

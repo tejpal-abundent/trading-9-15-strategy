@@ -4,6 +4,7 @@ import {
   dailyTriggerType,
   deriveConfluence,
   weeklyStopDecision,
+  computeSetupMatchCount,
 } from "../src/scanner.js";
 
 // replayResult: takes raw cells (as they appear inside scan-results JSON) and runs
@@ -80,6 +81,7 @@ export function replayResult(rawCells) {
     return out;
   }
 
+  daily.setup_match = computeSetupMatchCount(daily);
   daily.state = dailyCellState(daily, monthly, weekly);
   daily.trigger_type = dailyTriggerType(daily, weekly.direction);
   out.confluence_grade = deriveConfluence(monthly, weekly, daily);

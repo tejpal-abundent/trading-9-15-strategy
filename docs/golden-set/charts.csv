@@ -3,6 +3,6 @@ AUDUSD,2026-05-02,steep-pullback-flagged-as-chop,scan,long,long,7,0,NONE,—,dai
 GBPJPY,2026-05-02,long-pullback-flagged-as-chop,scan,long,long,7,0,NONE,—,daily_no_trigger,"same pattern as AUDUSD; should pass weekly with P1"
 XAUUSD,2026-05-02,weekly-slope-rolled-down,scan,long,long,0,99,NONE,—,monthly_weekly_disagree,"weekly slope direction disagrees with monthly even though EMA stack matches — legitimate stop must remain"
 GER40,2026-05-02,weekly-emas-flipped,scan,long,none,0,99,NONE,—,monthly_weekly_disagree,"weekly EMAs flipped — must remain a stop"
-USOIL,2026-05-02,weekly-clean-daily-soft-trigger,scan,long,long,7,0,WATCH,C,,"weekly clean score 7; daily 3/4 prep + in_bias solid_bull → should reach WATCH after P3+P5"
+USOIL,2026-05-02,weekly-clean-daily-soft-trigger,scan,long,long,7,0,ENTER,B,,"weekly clean score 7; daily 3/4 prep + in_bias solid_bull; P4 setup_match required satisfied → ENTER grade B"
 AUDNZD,2026-05-02,weekly-clean-daily-counter-bias,scan,long,long,8,0,NONE,—,daily_no_trigger,"weekly was strong but daily candle is genuine counter-bias seller — must remain a stop"
 # Rows 7-10 (user-curated) will be filled in Task 3 after user supplies symbol + date + scenario.

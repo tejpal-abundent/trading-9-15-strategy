@@ -101,6 +101,51 @@ export function isTrendDominant(monthly, weekly) {
   );
 }
 
+// P4: Setup-type-specific prep signal accounting. Returns:
+//   count               — number of relevant signals (required + bonus) that are true
+//   required_satisfied  — all required signals for the setup_type are true
+//   bonus_satisfied     — all bonus signals are true
+//   missing_required    — list of required signals that are false (for diagnostics)
+//
+// For setup_type ∉ {"pullback", "continuation"} the function falls back to
+// the legacy prep_signals_count + threshold-of-2 — so cells with no
+// classified setup_type behave exactly as today.
+export function computeSetupMatchCount(cell) {
+  if (!cell || typeof cell !== "object") {
+    return { count: 0, required_satisfied: false, bonus_satisfied: false, missing_required: [] };
+  }
+
+  const t = cell.setup_type;
+  const flag = (name) => cell[name] === true;
+
+  if (t !== "pullback" && t !== "continuation") {
+    const legacy = cell.prep_signals_count ?? 0;
+    return {
+      count: legacy,
+      required_satisfied: legacy >= 2,
+      bonus_satisfied: false,
+      missing_required: [],
+    };
+  }
+
+  const RULES = {
+    pullback:     { required: ["zone_rejection", "angle_ok"],     bonus: ["solid_continuation"] },
+    continuation: { required: ["solid_continuation", "angle_ok"], bonus: ["zone_rejection"] },
+  };
+
+  const rule = RULES[t];
+  const requiredTrue = rule.required.filter(flag);
+  const bonusTrue = rule.bonus.filter(flag);
+  const missing = rule.required.filter((s) => !flag(s));
+
+  return {
+    count: requiredTrue.length + bonusTrue.length,
+    required_satisfied: requiredTrue.length === rule.required.length,
+    bonus_satisfied: bonusTrue.length === rule.bonus.length,
+    missing_required: missing,
+  };
+}
+
 // P6: Decides whether a weekly cell should stop the cascade. Returns null
 // when the cascade should continue, or { stop_reason, flags } when it stops.
 // Pure function — no side effects, just reads the cell.
@@ -184,25 +229,32 @@ export function dailyCellState(cell, monthly = null, weekly = null) {
   const flags = cell.red_flags || [];
   if (flags.length > 0) return "NONE";
 
-  const prep = cell.prep_signals_count ?? 0;
+  const matchInfo = computeSetupMatchCount(cell);
+  const matchCount = matchInfo.count;
+  const requiredSatisfied = matchInfo.required_satisfied;
+
   const dominant = isTrendDominant(monthly, weekly);
   const watchFloor = dominant ? 1 : 2;
 
-  if (prep < watchFloor) return "NONE";
+  if (matchCount < watchFloor) return "NONE";
 
   const v = cell.candle_verdict;
   if (!v || typeof v !== "object") return "NONE";
 
-  // Trend-dominant prep=1 path: only WATCH (never ENTER), and requires in_bias + strength ≥ 5
-  if (dominant && prep === 1) {
+  // Trend-dominant prep=1 path: WATCH only, requires in_bias + strength ≥ WATCH_DOMINANT_WINNER_STRENGTH_THRESHOLD
+  if (dominant && matchCount === 1) {
     if (v.in_bias === true && (v.winner_strength ?? 0) >= WATCH_DOMINANT_WINNER_STRENGTH_THRESHOLD) return "WATCH";
     return "NONE";
   }
 
-  // Standard ENTER/WATCH path
-  if (v.in_bias !== true) return "WATCH";
-  if ((v.winner_strength ?? 0) < ENTER_WINNER_STRENGTH_THRESHOLD) return "WATCH";
-  return "ENTER";
+  // Standard ENTER path
+  if (v.in_bias === true && (v.winner_strength ?? 0) >= ENTER_WINNER_STRENGTH_THRESHOLD) {
+    const isTypedSetup = cell.setup_type === "pullback" || cell.setup_type === "continuation";
+    if (isTypedSetup && !requiredSatisfied) return "WATCH";
+    return "ENTER";
+  }
+
+  return "WATCH";
 }
 
 // Classifies the ENTER reason. Priority: sweep (highest conviction) > pattern
@@ -1202,6 +1254,7 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
   // Run consistency check BEFORE state derivation so dropped flags change
   // the NONE/WATCH/ENTER outcome.
   cell = validateCellConsistency(cell);
+  cell.setup_match = computeSetupMatchCount(cell);
   // Authoritative state computation — the scanner's code is the source of
   // truth for NONE/WATCH/ENTER, not the prompt's self-reported field.
   cell.state = dailyCellState(cell, monthlyCell, weeklyCell);
@@ -1410,6 +1463,7 @@ export async function evaluateSymbolV2(client, item, rubrics, opts = {}) {
 
   log(
     `      state=${result.daily.state} prep=${result.daily.prep_signals_count}/4 ` +
+      `match=${result.daily.setup_match?.count ?? "?"} ` +
       `trigger=${result.daily.trigger_type}`,
   );
 
