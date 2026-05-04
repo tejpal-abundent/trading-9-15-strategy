@@ -154,10 +154,19 @@ export async function openTvClient() {
 // _activeChartWidgetWV.value() controls the chart the user actually sees.
 const CHART_API = "window.TradingViewApi._activeChartWidgetWV.value()";
 
-// Wait until the chart's loading spinner is gone — TV's data feed loads
-// asynchronously after setSymbol/setResolution and silently drops subsequent
-// API calls if you don't wait for completion.
-export async function waitForChartReady(client, maxWaitMs = 10000) {
+// Wait until the chart is ready. Two modes:
+//   1. legacy (no expectedSymbol): only checks the loading spinner. Use this
+//      when the caller doesn't know what symbol to expect (e.g. initial
+//      bring-up, popup dismissal).
+//   2. symbol-aware (expectedSymbol set): polls until the spinner is gone
+//      AND the rendered legend matches expectedSymbol. This closes the
+//      false-positive case where setSymbol no-ops silently — without a
+//      spinner appearing, the legacy path returns true and the caller
+//      believes the switch worked.
+//
+// Returns true on ready, false on timeout. Caller should treat false as
+// "switch did not take, retry or escalate".
+export async function waitForChartReady(client, maxWaitMs = 10000, expectedSymbol = null) {
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     const { result } = await client.Runtime.evaluate({
@@ -171,10 +180,22 @@ export async function waitForChartReady(client, maxWaitMs = 10000) {
       `,
       returnByValue: true,
     }).catch(() => ({ result: { value: false } }));
-    if (!result.value) {
-      // Loading done — give a small additional settle before returning
-      await sleep(400);
-      return true;
+    const stillLoading = result.value;
+
+    if (!stillLoading) {
+      if (!expectedSymbol) {
+        await sleep(400);
+        return true;
+      }
+      // Symbol-aware: also require the rendered legend to match.
+      const rendered = await readRenderedSymbol(client);
+      if (rendered) {
+        const v = verifyRenderedMatchesExpected(rendered, expectedSymbol);
+        if (v.ok) {
+          await sleep(200);
+          return true;
+        }
+      }
     }
     await sleep(200);
   }
@@ -187,23 +208,152 @@ export async function closeTvClient(client) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function pressKey(client, { key, code, windowsVirtualKeyCode }) {
+async function pressKey(client, { key, code, windowsVirtualKeyCode, modifiers = 0 }) {
   await client.Input.dispatchKeyEvent({
     type: "keyDown",
     key,
     code,
     windowsVirtualKeyCode,
+    modifiers,
   });
   await client.Input.dispatchKeyEvent({
     type: "keyUp",
     key,
     code,
     windowsVirtualKeyCode,
+    modifiers,
   });
 }
 
-// Press Escape several times to clear stuck dialogs / popups, then click any
-// "close" / "X" / "skip" / "no thanks" button visible on screen.
+// F3 — switch via TV's actual symbol-search dialog instead of the widget API.
+//
+// IMPORTANT (2026-05-04 root-cause): a previous iteration tried Cmd+K — but
+// that opens TV's COMMAND PALETTE ("Search tool or function"), not the symbol
+// search. TV's symbol search dialog has placeholder "Symbol, ISIN, or CUSIP"
+// and is opened via `chart.executeActionById('symbolSearch')`.
+//
+// The dialog has its own input (no data-role attribute, has data-qa-id =
+// "symbol-search-input") and result rows (data-name = "symbol-search-dialog-
+// content-item"). Each row's innerText contains the ticker, the description,
+// the asset-class tags, AND the exchange name as plain text. We scan the
+// rows, find the first whose text contains BOTH our ticker and our exchange
+// (or an alias for the exchange), and click it. A click on the row activates
+// TV's own symbol-load flow — no data-feed lock to worry about.
+//
+// React-aware text injection: setting input.value directly only updates the
+// DOM, not React's state. We use the prototype's value setter + dispatch a
+// real `input` event so React's onChange handler runs and the search filters.
+//
+// Returns true if the legend matches tvSymbol within timeoutMs, false otherwise.
+async function setSymbolViaSearchBar(client, tvSymbol, timeoutMs = 8000) {
+  await dismissPopups(client);
+
+  const colon = tvSymbol.indexOf(":");
+  const exchange = colon >= 0 ? tvSymbol.slice(0, colon) : "";
+  const ticker = colon >= 0 ? tvSymbol.slice(colon + 1) : tvSymbol;
+
+  // 1. Open the symbol-search dialog via TV's own action. Verify it actually
+  // opened — on a cold-launched TV the very first executeActionById can fire
+  // before TV's UI is fully wired, leaving no dialog visible. Retry once if
+  // the dialog isn't found.
+  let dialogOpen = false;
+  for (let openAttempt = 0; openAttempt < 2; openAttempt++) {
+    await client.Runtime.evaluate({
+      expression: `
+        (function() {
+          try {
+            var chart = ${CHART_API};
+            if (chart && typeof chart.executeActionById === 'function') {
+              chart.executeActionById('symbolSearch');
+              return 'ok';
+            }
+            return 'no_api';
+          } catch (e) { return 'err:' + (e.message || e); }
+        })()
+      `,
+      returnByValue: true,
+    }).catch(() => {});
+    await sleep(openAttempt === 0 ? 800 : 1500);
+
+    const { result } = await client.Runtime.evaluate({
+      expression: `(function(){
+        var dlg = document.querySelector('[data-name="symbol-search-items-dialog"]');
+        return !!(dlg && dlg.offsetParent !== null);
+      })()`,
+      returnByValue: true,
+    }).catch(() => ({ result: { value: false } }));
+    if (result.value) {
+      dialogOpen = true;
+      break;
+    }
+  }
+  if (!dialogOpen) return false;
+
+  // 2. Inject the ticker into the search input and dispatch a React-aware
+  // `input` event so search results actually filter.
+  await client.Runtime.evaluate({
+    expression: `
+      (function() {
+        var dlg = document.querySelector('[data-name="symbol-search-items-dialog"]');
+        var inp = dlg && dlg.querySelector('input');
+        if (!inp) return 'no_input';
+        inp.focus();
+        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(inp, ${JSON.stringify(ticker)});
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+        return 'ok';
+      })()
+    `,
+    returnByValue: true,
+  }).catch(() => {});
+  await sleep(1500); // settle for search debounce + result render
+
+  // 3. Find the result row whose innerText contains both ticker and exchange
+  // (or an alias) and click it. Click drives TV's own load path.
+  const aliases = (EXCHANGE_ALIASES[exchange] || [exchange])
+    .filter(Boolean)
+    .map((a) => a.toUpperCase());
+  const { result: clickRes } = await client.Runtime.evaluate({
+    expression: `
+      (function() {
+        var rows = document.querySelectorAll('[data-name="symbol-search-dialog-content-item"]');
+        var aliases = ${JSON.stringify(aliases)};
+        var tick = ${JSON.stringify(ticker.toUpperCase())};
+        for (var i = 0; i < rows.length; i++) {
+          var t = (rows[i].innerText || '').toUpperCase();
+          if (t.indexOf(tick) === -1) continue;
+          for (var j = 0; j < aliases.length; j++) {
+            if (aliases[j] && t.indexOf(aliases[j]) !== -1) {
+              rows[i].click();
+              return JSON.stringify({ clicked: true, idx: i });
+            }
+          }
+        }
+        return JSON.stringify({ clicked: false, rows: rows.length });
+      })()
+    `,
+    returnByValue: true,
+  }).catch(() => ({ result: { value: '{"clicked":false}' } }));
+
+  let clickInfo = { clicked: false };
+  try { clickInfo = JSON.parse(clickRes.value); } catch {}
+
+  if (!clickInfo.clicked) {
+    // No matching row — fall through to caller's escalation. ESC closes the
+    // dialog so we don't leave it open.
+    await pressKey(client, { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    return false;
+  }
+
+  // 4. Wait for the legend to actually reflect the click.
+  return await waitForChartReady(client, timeoutMs, tvSymbol);
+}
+
+// Press Escape several times to clear stuck dialogs / popups, then click
+// anything that looks like a dismiss/close affordance — including the
+// unlabeled "X" buttons TV uses on promotional ads ("50% lower FX trading
+// costs", "get 30% off", etc.) which previously slipped past the explicit
+// label list and could block setSymbol from taking effect.
 export async function dismissPopups(client) {
   // ESC twice catches most modals
   for (let i = 0; i < 2; i++) {
@@ -211,23 +361,35 @@ export async function dismissPopups(client) {
     await sleep(80);
   }
 
-  // Best-effort: click anything that looks like a dismiss button.
   await client.Runtime.evaluate({
     expression: `
       (function() {
         const labels = ['close', 'no thanks', 'skip', 'dismiss', 'maybe later', 'not now'];
-        const els = Array.from(document.querySelectorAll('button, [role="button"], a'));
+        const els = Array.from(document.querySelectorAll('button, [role="button"], a, [class*="close"]'));
         let clicked = 0;
         for (const el of els) {
           const text = (el.innerText || el.getAttribute('aria-label') || '').trim().toLowerCase();
           const dataName = (el.getAttribute('data-name') || '').toLowerCase();
+          const className = (el.className || '').toString().toLowerCase();
+          // Visible icon-only X buttons: <button class="…close…">×</button>.
+          const looksLikeXButton =
+            (className.includes('close') || dataName.includes('close')) &&
+            (text === '' || text === '×' || text === 'x' || text.length <= 2);
+          // Promotional ad container's close button: usually has class /Promo|Banner|Cta/
+          // with a child button.
           if (
-            labels.some(l => text === l || text.includes(l)) ||
+            labels.some((l) => text === l || text.includes(l)) ||
             dataName.includes('close') ||
-            dataName.includes('dismiss')
+            dataName.includes('dismiss') ||
+            looksLikeXButton
           ) {
             const rect = el.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0 && rect.top < window.innerHeight) {
+            if (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              rect.top < window.innerHeight &&
+              rect.left < window.innerWidth
+            ) {
               try { el.click(); clicked++; } catch (e) {}
             }
           }
@@ -366,42 +528,41 @@ export function verifyRenderedMatchesExpected(rendered, expectedTvSymbol) {
 }
 
 // Internal: ask the widget API to switch to tvSymbol. Returns parsed result.
+// Call TradingView's `chart.setSymbol(...)` widget API and wait long enough
+// for the call's internal async work to start. The call itself is fire-and-
+// forget on TV's side — it schedules a data-feed reload + canvas re-render
+// and returns immediately. Without an internal settle here, the next CDP
+// call can race the previous one and TV may collapse / drop calls. The MCP
+// reference implementation uses 500ms; we use the same.
 async function callSetSymbolApi(client, tvSymbol) {
-  const { result } = await client.Runtime.evaluate({
+  const { result, exceptionDetails } = await client.Runtime.evaluate({
     expression: `
       (function() {
-        try {
-          var chart = ${CHART_API};
-          if (!chart || typeof chart.setSymbol !== 'function') {
-            return JSON.stringify({ ok: false, reason: 'api_not_available' });
-          }
-          chart.setSymbol('${tvSymbol.replace(/'/g, "\\'")}', {});
-          return JSON.stringify({ ok: true });
-        } catch (e) {
-          return JSON.stringify({ ok: false, reason: 'exception:' + (e.message || e) });
+        var chart = ${CHART_API};
+        if (!chart || typeof chart.setSymbol !== 'function') {
+          return Promise.resolve(JSON.stringify({ ok: false, reason: 'api_not_available' }));
         }
+        return new Promise(function(resolve) {
+          try {
+            chart.setSymbol('${tvSymbol.replace(/'/g, "\\'")}', {});
+            setTimeout(function() { resolve(JSON.stringify({ ok: true })); }, 500);
+          } catch (e) {
+            resolve(JSON.stringify({ ok: false, reason: 'exception:' + (e.message || e) }));
+          }
+        });
       })()
     `,
     returnByValue: true,
+    awaitPromise: true,
   });
-  return JSON.parse(result.value);
-}
-
-// Wait until the legend reports a description matching `expectedTvSymbol`.
-// Returns { ok, rendered }.
-async function waitForRenderedSymbol(client, expectedTvSymbol, maxWaitMs = 8000) {
-  const deadline = Date.now() + maxWaitMs;
-  let last = null;
-  while (Date.now() < deadline) {
-    const rendered = await readRenderedSymbol(client);
-    last = rendered;
-    if (rendered) {
-      const v = verifyRenderedMatchesExpected(rendered, expectedTvSymbol);
-      if (v.ok) return { ok: true, rendered };
-    }
-    await sleep(300);
+  if (exceptionDetails) {
+    return { ok: false, reason: "cdp_eval_exception" };
   }
-  return { ok: false, rendered: last };
+  try {
+    return JSON.parse(result.value);
+  } catch {
+    return { ok: false, reason: "parse_error" };
+  }
 }
 
 // Switch chart to {tvSymbol} using TradingView's exposed widget API. Same
@@ -437,60 +598,60 @@ export async function setSymbol(client, tvSymbol) {
     }
   }
 
-  const MAX_ATTEMPTS = 3;
+  // Recovery (post-2026-05-04 root-cause):
+  //   1) Plain widget setSymbol with awaitPromise + 500ms internal settle.
+  //      Fast path — works ~95% of the time when TV is healthy. Verifies
+  //      via symbol-aware waitForChartReady (legend match required).
+  //   2) Symbol-search-dialog fallback. Calls executeActionById('symbolSearch'),
+  //      injects the ticker via React-aware setter, finds and clicks the row
+  //      whose text matches both the ticker AND the exchange. This is a
+  //      completely different code path inside TV that does its own load —
+  //      bulletproof against widget-API silent no-ops, popup races, etc.
+  //
+  // Page.reload was REMOVED as a recovery — TV restores the wedged symbol
+  // from saved layout state on every reload, counterproductive.
+  // Each attempt runs dismissPopups() first so promotional ads don't
+  // intercept our clicks.
+  const MAX_ATTEMPTS = 2;
   let lastRendered = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    // Strategy escalates with attempt #
+    await dismissPopups(client);
+
     if (attempt === 1) {
-      // Plain widget setSymbol
       const r = await callSetSymbolApi(client, tvSymbol);
       if (!r.ok) {
-        // API itself failed — retry the same call once before escalating
         await sleep(500);
         await callSetSymbolApi(client, tvSymbol);
       }
-    } else if (attempt === 2) {
-      // Toggle through a different symbol then back. TV's data feed sometimes
-      // refuses to re-load the same chart, but a forced symbol cycle clears
-      // the lock.
+      // 25s timeout — TV's data feed can take 15-20s for cold-loads (esp.
+      // BTC weekly, GER40), and our verification was timing out at 8s right
+      // before TV's canvas finally caught up. Polls every 200ms and returns
+      // the moment the legend matches, so this is a CEILING not a floor —
+      // fast loads still return in 2-3s.
+      const ready = await waitForChartReady(client, 25000, tvSymbol);
+      if (ready) {
+        await dismissPopups(client);
+        return;
+      }
+      lastRendered = await readRenderedSymbol(client);
       console.log(
-        `      [setSymbol: attempt ${attempt}/${MAX_ATTEMPTS} — cycling via OANDA:EURUSD then back to ${tvSymbol}]`,
+        `      [setSymbol: attempt 1/${MAX_ATTEMPTS} — rendered legend still '${
+          lastRendered?.description || "<none>"
+        }' / '${lastRendered?.exchange || "<none>"}', escalating to search dialog]`,
       );
-      await callSetSymbolApi(
-        client,
-        tvSymbol === "OANDA:EURUSD" ? "BINANCE:BTCUSDT" : "OANDA:EURUSD",
-      );
-      await sleep(1500);
-      await callSetSymbolApi(client, tvSymbol);
     } else {
-      // Last resort — reload the page. Heavy hammer but recovers from the
-      // hard-stuck state where TV's data feed is locked.
+      const ok = await setSymbolViaSearchBar(client, tvSymbol, 15000);
+      if (ok) {
+        await dismissPopups(client);
+        return;
+      }
+      lastRendered = await readRenderedSymbol(client);
       console.log(
-        `      [setSymbol: attempt ${attempt}/${MAX_ATTEMPTS} — Page.reload as last-resort recovery]`,
+        `      [setSymbol: attempt 2/${MAX_ATTEMPTS} (search dialog) — rendered legend still '${
+          lastRendered?.description || "<none>"
+        }' / '${lastRendered?.exchange || "<none>"}']`,
       );
-      await client.Page.reload({}).catch(() => {});
-      await sleep(8000); // wait for page to come back up
-      await waitForChartReady(client, 12000);
-      await callSetSymbolApi(client, tvSymbol);
     }
-
-    // Hard wait for chart's data feed to load new symbol — without this,
-    // subsequent setResolution() calls get silently dropped.
-    await waitForChartReady(client);
-    await sleep(2000);
-
-    // Truthful verification — read the rendered legend, not chart.symbol().
-    const { ok, rendered } = await waitForRenderedSymbol(client, tvSymbol, 6000);
-    lastRendered = rendered;
-    if (ok) {
-      await dismissPopups(client);
-      return;
-    }
-    console.log(
-      `      [setSymbol: attempt ${attempt}/${MAX_ATTEMPTS} — rendered legend still '${
-        rendered?.description || "<none>"
-      }' / '${rendered?.exchange || "<none>"}', expected ${tvSymbol}]`,
-    );
   }
 
   throw new ChartSymbolSwitchFailedError({
