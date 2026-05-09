@@ -27,14 +27,22 @@ Return **pure JSON only** (no prose, no markdown fences).
 
 Look at the chart and report the following raw observations. No interpretation — just describe what is visibly there. You will use these in Pass 2 to justify every qualitative claim.
 
+**Anchor first.** The TradingView chart header (top-left of the chart canvas) shows `O / H / L / C` for the bar your cursor is hovering over. Hover over the **rightmost CLOSED candle** (the one immediately to the LEFT of any forming/in-progress bar — if there is no forming bar, the rightmost solid candle on the chart). Read its O/H/L/C from the header and copy those four numbers into `current_closed_bar.open/high/low/close`. Then compute body/wick/close_position FROM those numbers, not by eye. If the chart header values don't match what you'd estimate visually, trust the header — your visual estimate is wrong, the header is the source of truth.
+
 ```json
 "measurements": {
   "prior_bar": {
     "color": "green" | "red",
     "body_pct_of_range": 0,
-    "high_relative_to_ema_band": "above" | "inside" | "below"
+    "high_relative_to_ema_band": "above" | "inside" | "below",
+    "bars_from_right": 2
   },
   "current_closed_bar": {
+    "open": 0.0,
+    "high": 0.0,
+    "low": 0.0,
+    "close": 0.0,
+    "bars_from_right": 1,
     "color": "green" | "red",
     "body_pct_of_range": 0,
     "upper_wick_pct": 0,

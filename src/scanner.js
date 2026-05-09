@@ -970,11 +970,100 @@ export function sweepGateSatisfied(claim, measurements) {
 // to "keep" because `direction` is undefined and `gateSatisfied` returns true
 // on its "no bias" branch. Default null preserves the legacy single-arg
 // behavior for monthly/weekly callers (they have direction natively).
+// V2.2 — recompute body% / wick% / close_position / color from the bar's
+// reported OHLC. Returns null when OHLC is missing or insane (high <= low).
+// Pure — caller decides whether to replace reported values or log drift.
+export function recomputeBarFromOhlc(bar) {
+  if (!bar) return null;
+  const { open, high, low, close } = bar;
+  if (
+    typeof open !== "number" ||
+    typeof high !== "number" ||
+    typeof low !== "number" ||
+    typeof close !== "number" ||
+    high <= low
+  ) {
+    return null;
+  }
+  const range = high - low;
+  const closeFrac = (close - low) / range;
+  let close_position;
+  if (closeFrac >= 0.95) close_position = "at_high";
+  else if (closeFrac >= 0.66) close_position = "upper_third";
+  else if (closeFrac >= 0.33) close_position = "mid";
+  else if (closeFrac >= 0.05) close_position = "lower_third";
+  else close_position = "at_low";
+  return {
+    body_pct_of_range: Math.round((Math.abs(close - open) / range) * 100),
+    upper_wick_pct: Math.round(((high - Math.max(open, close)) / range) * 100),
+    lower_wick_pct: Math.round(((Math.min(open, close) - low) / range) * 100),
+    close_position,
+    color: close > open ? "green" : close < open ? "red" : "doji",
+  };
+}
+
 export function validateCellConsistency(cell, fallbackDirection = null) {
   if (!cell || cell.parse_failed) return cell;
   if (!cell.measurements) return cell;
 
   const log = [];
+
+  // 0. V2.2 — OHLC anchor consistency. When the model returned O/H/L/C for
+  // current_closed_bar, recompute body% / wick% / close_position / color from
+  // those numbers and overwrite the reported values when they drift > 5pp or
+  // disagree on bucket. Catches both arithmetic mistakes AND wrong-bar
+  // identification (model echoing OHLC from candle X but reading measurements
+  // off candle Y — the chart-header OHLC is the authoritative anchor). Legacy
+  // cells without OHLC pass through unchanged for back-compat.
+  const c0 = cell.measurements.current_closed_bar;
+  const computed = recomputeBarFromOhlc(c0);
+  if (computed) {
+    const numericChecks = [
+      ["body_pct_of_range", computed.body_pct_of_range],
+      ["upper_wick_pct", computed.upper_wick_pct],
+      ["lower_wick_pct", computed.lower_wick_pct],
+    ];
+    for (const [field, computedValue] of numericChecks) {
+      const reported = c0[field];
+      if (typeof reported !== "number") {
+        c0[field] = computedValue;
+      } else if (Math.abs(reported - computedValue) > 5) {
+        log.push(
+          `recomputed current_closed_bar.${field} ${reported} → ${computedValue} (from OHLC)`,
+        );
+        c0[field] = computedValue;
+      }
+    }
+    if (!c0.close_position) {
+      c0.close_position = computed.close_position;
+    } else if (c0.close_position !== computed.close_position) {
+      log.push(
+        `recomputed current_closed_bar.close_position '${c0.close_position}' → '${computed.close_position}' (from OHLC)`,
+      );
+      c0.close_position = computed.close_position;
+    }
+    if (computed.color !== "doji" && c0.color && c0.color !== computed.color) {
+      log.push(
+        `recomputed current_closed_bar.color '${c0.color}' → '${computed.color}' (from OHLC)`,
+      );
+      c0.color = computed.color;
+    } else if (!c0.color) {
+      c0.color = computed.color;
+    }
+    // Keep candle_verdict in lockstep — the prompt says these numbers are the
+    // same value exposed twice, so any correction must propagate.
+    const cv = cell.candle_verdict;
+    if (cv) {
+      for (const [field, computedValue] of numericChecks) {
+        if (typeof cv[field] === "number" && Math.abs(cv[field] - computedValue) > 5) {
+          cv[field] = computedValue;
+        }
+      }
+      if (cv.close_position && cv.close_position !== computed.close_position) {
+        cv.close_position = computed.close_position;
+      }
+    }
+  }
 
   // 1. Drop self-contradicting red flags
   if (Array.isArray(cell.red_flags) && cell.red_flags.length > 0) {

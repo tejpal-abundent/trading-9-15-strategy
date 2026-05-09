@@ -25,5 +25,6 @@
   { "label": "GER40",   "tv_symbol": "OANDA:DE30EUR",   "binance_symbol": null },
   { "label": "HK50",    "tv_symbol": "OANDA:HK33HKD",   "binance_symbol": null },
   { "label": "TSLA",    "tv_symbol": "NASDAQ:TSLA",     "binance_symbol": null },
-  { "label": "AAPL",    "tv_symbol": "NASDAQ:AAPL",     "binance_symbol": null }
+  { "label": "AAPL",    "tv_symbol": "NASDAQ:AAPL",     "binance_symbol": null },
+  { "label": "DXY",     "tv_symbol": "TVC:DXY",         "binance_symbol": null }
 ]
