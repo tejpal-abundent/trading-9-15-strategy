@@ -2193,7 +2193,43 @@ export async function runScanV2(options = {}) {
       `═══════════════════════════════════════════════════════════\n`,
   );
 
+  // V2.3 — TV/CDP resilience.
+  //
+  // Two failure modes addressed here:
+  //   (a) chart_switch_failed — TV's data feed gets stuck on a previous
+  //       symbol. waitForChartReady's 25s ceiling sometimes isn't enough.
+  //   (b) WebSocket is not open: readyState 3 (CLOSED) — chrome-remote-
+  //       interface's WS to the TV debug port silently drops mid-scan
+  //       (TV stays alive). Without reconnect, every subsequent symbol
+  //       fails instantly without even trying.
+  //
+  // Strategy: when (b) is detected, reopen the CDP client immediately and
+  // continue; the failed symbol is queued for end-of-scan retry. (a) is also
+  // queued for retry. After the main loop, retry the queued symbols once
+  // each with a freshly-reopened client (TV often clears whatever state was
+  // blocking the original switch after a few minutes of other activity).
+  //
+  // A symbol that still fails on retry stays a hard skip in the report.
+
+  const isWebSocketDownErr = (err) =>
+    err && /WebSocket is not open|readyState 3 \(CLOSED\)/i.test(err.message || "");
+
+  const failedItem = (item, stopReason) => ({
+    symbol: item.label,
+    tv_symbol: item.tv_symbol,
+    stopped_at: null,
+    stop_reason: stopReason,
+    monthly: null,
+    weekly: null,
+    daily: null,
+    confluence_grade: "—",
+    cost_usd: 0,
+    pipeline: "v2-mtf-candle-verdict",
+  });
+
   const results = [];
+  const retryQueue = []; // [{ item, resultIndex }] — items that hit a
+                         // recoverable failure and deserve a second pass.
   let client;
   try {
     client = await openTvClient();
@@ -2211,35 +2247,82 @@ export async function runScanV2(options = {}) {
       } catch (err) {
         if (err instanceof ChartSymbolSwitchFailedError) {
           console.log(
-            `    🚫 SKIP: chart_switch_failed (rendered=${err.rendered}, expected=${err.requested})`,
+            `    🚫 chart_switch_failed (rendered=${err.rendered}, expected=${err.requested}) — queued for end-of-scan retry`,
           );
-          results.push({
-            symbol: item.label,
-            tv_symbol: item.tv_symbol,
-            stopped_at: null,
-            stop_reason: `chart_switch_failed (rendered=${err.rendered})`,
-            monthly: null,
-            weekly: null,
-            daily: null,
-            confluence_grade: "—",
-            cost_usd: 0,
-            pipeline: "v2-mtf-candle-verdict",
-          });
+          const idx = results.length;
+          results.push(failedItem(item, `chart_switch_failed (rendered=${err.rendered})`));
+          retryQueue.push({ item, resultIndex: idx });
+          continue;
+        }
+        if (isWebSocketDownErr(err)) {
+          console.log(`    🔌 WebSocket dropped — reconnecting CDP client`);
+          try {
+            await closeTvClient(client);
+          } catch {}
+          try {
+            client = await openTvClient();
+            console.log(`    ✅ CDP reconnected`);
+          } catch (reconErr) {
+            console.log(`    ❌ CDP reconnect failed: ${reconErr.message}`);
+          }
+          const idx = results.length;
+          results.push(failedItem(item, `cdp_disconnect: ${err.message}`));
+          retryQueue.push({ item, resultIndex: idx });
           continue;
         }
         console.log(`    ❌ ${err.message}`);
-        results.push({
-          symbol: item.label,
-          tv_symbol: item.tv_symbol,
-          stopped_at: null,
-          stop_reason: `error: ${err.message}`,
-          monthly: null,
-          weekly: null,
-          daily: null,
-          confluence_grade: "—",
-          cost_usd: 0,
-          pipeline: "v2-mtf-candle-verdict",
-        });
+        results.push(failedItem(item, `error: ${err.message}`));
+      }
+    }
+
+    // End-of-scan retry pass for queued failures. Single retry, fresh client.
+    if (retryQueue.length > 0) {
+      console.log(
+        `\n─── Retry pass: ${retryQueue.length} symbol(s) ───────────────────`,
+      );
+      try {
+        await closeTvClient(client);
+      } catch {}
+      try {
+        client = await openTvClient();
+      } catch (reconErr) {
+        console.log(`  ❌ Could not reopen CDP for retry: ${reconErr.message}`);
+        retryQueue.length = 0;
+      }
+      for (const { item, resultIndex } of retryQueue) {
+        console.log(`\n[retry] ▶ ${item.label} (${item.tv_symbol})`);
+        try {
+          const r = await evaluateSymbolV2(client, item, rubrics, {
+            verbose: true,
+            dateDir,
+            priorRuns: priorBySymbol.get(item.label) ?? [],
+          });
+          results[resultIndex] = r;
+        } catch (err) {
+          if (err instanceof ChartSymbolSwitchFailedError) {
+            console.log(
+              `    🚫 still chart_switch_failed (rendered=${err.rendered}) — final skip`,
+            );
+            results[resultIndex] = failedItem(
+              item,
+              `chart_switch_failed_after_retry (rendered=${err.rendered})`,
+            );
+            continue;
+          }
+          if (isWebSocketDownErr(err)) {
+            console.log(`    🔌 WS dropped again on retry — reconnecting`);
+            try {
+              await closeTvClient(client);
+            } catch {}
+            try {
+              client = await openTvClient();
+            } catch {}
+            results[resultIndex] = failedItem(item, `cdp_disconnect_after_retry: ${err.message}`);
+            continue;
+          }
+          console.log(`    ❌ ${err.message}`);
+          results[resultIndex] = failedItem(item, `error_after_retry: ${err.message}`);
+        }
       }
     }
   } finally {
