@@ -301,7 +301,37 @@ export function dailyCellState(cell, monthly = null, weekly = null) {
   const requiredSatisfied = matchInfo.required_satisfied;
 
   const dominant = isTrendDominant(monthly, weekly);
-  const watchFloor = dominant ? 1 : 2;
+  let watchFloor = dominant ? 1 : 2;
+
+  // V2.5 — strong-trigger pre-check. When the candle is itself a decisive
+  // recognized pattern in-bias (engulfing/solid/hammer/etc with body ≥ 60%,
+  // winner_strength ≥ 7, close at extreme), the candle IS the trigger — we
+  // don't need 2+ corroborating prep signals. Lower the watchFloor to 1 so
+  // matchCount=1 (just angle_ok confirming EMA structure) is enough to
+  // continue into the ENTER path. This catches the "trapped trader / pattern
+  // rejection" setup that the previous gate kept pinning at NONE on
+  // matchCount<2.
+  const v0 = cell.candle_verdict;
+  const c0 = cell.measurements?.current_closed_bar;
+  const closeAtExtreme0 =
+    c0?.close_position === "at_low" ||
+    c0?.close_position === "at_high" ||
+    c0?.close_position === "lower_third" ||
+    c0?.close_position === "upper_third";
+  const direction0 = weekly?.direction;
+  const patternSet0 = direction0 === "long"
+    ? new Set(["engulfing_bull", "hammer", "pinbar_bull", "solid_bull"])
+    : direction0 === "short"
+      ? new Set(["engulfing_bear", "shooting_star", "pinbar_bear", "solid_bear"])
+      : new Set();
+  const strongTriggerCandle =
+    v0 &&
+    patternSet0.has(v0.pattern) &&
+    v0.in_bias === true &&
+    (v0.winner_strength ?? 0) >= 7 &&
+    (c0?.body_pct_of_range ?? 0) >= 60 &&
+    closeAtExtreme0;
+  if (strongTriggerCandle) watchFloor = 1;
 
   if (matchCount < watchFloor) return "NONE";
 
@@ -317,7 +347,40 @@ export function dailyCellState(cell, monthly = null, weekly = null) {
   // Standard ENTER path
   if (v.in_bias === true && (v.winner_strength ?? 0) >= ENTER_WINNER_STRENGTH_THRESHOLD) {
     const isTypedSetup = cell.setup_type === "pullback" || cell.setup_type === "continuation";
-    if (isTypedSetup && !requiredSatisfied) return "WATCH";
+    // V2.5 — strong-trigger override. The candle ITSELF is the signal —
+    // when a recognized reversal/continuation pattern prints in-bias with a
+    // decisive close, prep_signals_count of 1 (angle_ok alone) is enough to
+    // promote to ENTER. Catches the "engulfing rejection / trapped-trader
+    // trap-and-flip" signal that the model often classifies as setup_type
+    // "continuation" but is really an entry trigger at the candle level.
+    //
+    // Conditions (ALL must hold):
+    //   - candle_verdict.pattern ∈ {engulfing_bull/bear, hammer, shooting_star,
+    //     pinbar_bull/bear, solid_bull, solid_bear} matching bias direction
+    //   - winner_strength ≥ 7
+    //   - body_pct_of_range ≥ 60
+    //   - close_position at extreme (at_high/at_low or upper_third/lower_third)
+    //   - prep_signals_count ≥ 1 (typically angle_ok confirming EMA structure)
+    const c = cell.measurements?.current_closed_bar;
+    const closeAtExtreme =
+      c?.close_position === "at_low" ||
+      c?.close_position === "at_high" ||
+      c?.close_position === "lower_third" ||
+      c?.close_position === "upper_third";
+    const direction = weekly?.direction;
+    const patternSet = direction === "long"
+      ? new Set(["engulfing_bull", "hammer", "pinbar_bull", "solid_bull"])
+      : direction === "short"
+        ? new Set(["engulfing_bear", "shooting_star", "pinbar_bear", "solid_bear"])
+        : new Set();
+    const recognizedPattern = patternSet.has(v.pattern);
+    const strongTrigger =
+      recognizedPattern &&
+      (v.winner_strength ?? 0) >= 7 &&
+      (c?.body_pct_of_range ?? 0) >= 60 &&
+      closeAtExtreme &&
+      (cell.prep_signals_count ?? 0) >= 1;
+    if (isTypedSetup && !requiredSatisfied && !strongTrigger) return "WATCH";
 
     // V2.1 — RR gate. Below MIN_ENTER_RR the trade is mathematically not worth
     // taking. Downgrade to WATCH so it shows on the report (the human can

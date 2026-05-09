@@ -109,6 +109,16 @@ Compute body/wick/close_position from the chosen bar's exact OHLC. The four form
 
 ## Pass 2 — Gated verdicts
 
+### Step 0 — Setup type (pullback vs continuation)
+
+Look at the last 3 closed bars (`last_5_candles[-2]`, `last_5_candles[-1]`, `last_5_candles[0]`) and pick ONE:
+
+- **"pullback"** — at least ONE of `last_5_candles[-2]` or `last_5_candles[-1]` closed COUNTER-bias (e.g. green close in a short setup, red close in a long setup), AND `current_closed_bar` (= `last_5_candles[0]`) closed solidly IN-bias and broke the prior bar's extreme. This is the "trapped trader / failed reversal then engulf" pattern — the counter-bias bar(s) attracted longs/shorts who got run over by the bias-direction continuation.
+- **"continuation"** — the last 3 bars (`-2`, `-1`, `0`) ALL closed in-bias with no counter-bias attempt visible. Steady drive in the bias direction, no pullback to clear.
+- **"none"** — neither (choppy, mixed, or current bar isn't decisively in-bias).
+
+**Bias for "pullback" labeling:** when the recent counter-bias attempt got engulfed/rejected by the current bar, prefer "pullback" over "continuation" — the rejection IS the trigger.
+
 ### Step 1 — Prep signals (setup forming)
 
 Each is a precondition for a valid trigger — not the trigger itself.
