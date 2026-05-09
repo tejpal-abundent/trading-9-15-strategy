@@ -15,6 +15,8 @@ import {
   readRenderedSymbol,
   verifyRenderedMatchesExpected,
   ChartSymbolSwitchFailedError,
+  getRecentBars,
+  formatRecentBarsForPrompt,
 } from "./tv-navigate.js";
 import { askGeminiVision, getTodaysCost, recordCost, fillRubric } from "./visual.js";
 import { fetchCandles, emaAlignment, agree } from "./higher-tf.js";
@@ -1341,6 +1343,11 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBl
     dateDir,
   );
 
+  // V2.5 — OHLC ground truth from TV's data feed. Replaces the model's
+  // brittle pixel-based bar identification with exact numbers.
+  const recentBars = await getRecentBars(client, 6);
+  const ohlcGroundTruth = formatRecentBarsForPrompt(recentBars);
+
   const primaryModel =
     process.env.MONTHLY_MODEL ||
     process.env.VISUAL_MODEL ||
@@ -1374,6 +1381,7 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBl
       SYMBOL: item.label,
       CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
       PRIOR_CONTEXT: priorBlock,
+      OHLC_GROUND_TRUTH: ohlcGroundTruth,
     });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
@@ -1456,6 +1464,10 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     dateDir,
   );
 
+  // V2.5 — OHLC ground truth from TV's data feed.
+  const recentBars = await getRecentBars(client, 6);
+  const ohlcGroundTruth = formatRecentBarsForPrompt(recentBars);
+
   const monthlyBias = monthlyCell.direction || "none";
   const in9_15Note = monthlyCell.in_9_15_zone
     ? "Monthly price is currently in the 9-15 zone — this is an A+ setup context."
@@ -1496,6 +1508,7 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
       MONTHLY_IN_9_15_ZONE_NOTE: in9_15Note,
       CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
       PRIOR_CONTEXT: priorBlock,
+      OHLC_GROUND_TRUTH: ohlcGroundTruth,
     });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
@@ -1581,6 +1594,10 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     dateDir,
   );
 
+  // V2.5 — OHLC ground truth from TV's data feed.
+  const recentBars = await getRecentBars(client, 6);
+  const ohlcGroundTruth = formatRecentBarsForPrompt(recentBars);
+
   const primaryModel =
     process.env.DAILY_MODEL ||
     process.env.VISUAL_MODEL ||
@@ -1620,6 +1637,7 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
       WEEKLY_POI_LIST: formatWeeklyPoiList(weeklyCell.weekly_poi),
       CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
       PRIOR_CONTEXT: priorBlock,
+      OHLC_GROUND_TRUTH: ohlcGroundTruth,
     });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);

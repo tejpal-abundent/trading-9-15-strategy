@@ -154,6 +154,87 @@ export async function openTvClient() {
 // _activeChartWidgetWV.value() controls the chart the user actually sees.
 const CHART_API = "window.TradingViewApi._activeChartWidgetWV.value()";
 
+// Path to the chart's main-series bars data. Each bar is a 6-tuple:
+// [time_seconds, open, high, low, close, volume?]. lastIndex() / firstIndex()
+// give the integer index range; valueAt(i) returns the tuple. This is the
+// authoritative OHLC the chart is rendering — same data feed that drives the
+// candles. Lifted from the upstream MCP server for direct CDP-eval use.
+const BARS_API = `${CHART_API}._chartWidget.model().mainSeries().bars()`;
+
+// V2.5 — Fetch the last `count` bars from TV's chart data feed. Returns
+// objects ordered oldest → newest, each { time, open, high, low, close }.
+// The rightmost (last array entry) is what TV's data feed considers the
+// most recent bar — which MAY be a partially-formed bar during live markets.
+// Caller should call `pickClosedAndForming` to disambiguate if needed.
+//
+// Returns null if the chart isn't ready / data feed not loaded.
+export async function getRecentBars(client, count = 5) {
+  const { result } = await client.Runtime.evaluate({
+    expression: `
+      (function() {
+        try {
+          var bars = ${BARS_API};
+          if (!bars || typeof bars.lastIndex !== 'function') return null;
+          var end = bars.lastIndex();
+          var start = Math.max(bars.firstIndex(), end - ${count} + 1);
+          var out = [];
+          for (var i = start; i <= end; i++) {
+            var v = bars.valueAt(i);
+            if (v) out.push({ time: v[0], open: v[1], high: v[2], low: v[3], close: v[4] });
+          }
+          return JSON.stringify(out);
+        } catch (e) { return null; }
+      })()
+    `,
+    returnByValue: true,
+  }).catch(() => ({ result: { value: null } }));
+  if (!result?.value) return null;
+  try {
+    return JSON.parse(result.value);
+  } catch {
+    return null;
+  }
+}
+
+// V2.5 — Format the last two bars as a "ground truth" snippet for inclusion
+// in the eval prompts. The model still does the easy visual judgment of
+// "is the rightmost candle forming or fully closed", but it does NOT have
+// to extract OHLC numbers from pixels — those come from TV's data feed.
+//
+// This eliminates the wrong-bar-identification variance we saw across runs
+// where the model echoed self-consistent-but-wrong OHLC for a bar it had
+// misidentified. By scoping the choice to only TWO candidates (rightmost vs
+// second-from-right) and providing exact numbers for both, the easy visual
+// call ("forming or solid") replaces the brittle bar-IDENTIFY-and-MEASURE
+// flow.
+export function formatRecentBarsForPrompt(bars) {
+  if (!Array.isArray(bars) || bars.length < 2) {
+    return "(OHLC ground truth unavailable — scanner could not fetch bar data; estimate visually)";
+  }
+  const fmt = (b) => {
+    const date = new Date((b.time ?? 0) * 1000).toISOString().slice(0, 10);
+    return `time=${date} open=${b.open} high=${b.high} low=${b.low} close=${b.close}`;
+  };
+  const lastIdx = bars.length - 1;
+  const lines = [
+    "## OHLC ground truth (from TV's data feed — these numbers are authoritative; do NOT estimate from pixels)",
+    "",
+    "Last 2 bars on this chart:",
+    `  • bar A (rightmost on chart, position 0):       ${fmt(bars[lastIdx])}`,
+    `  • bar B (second-from-right, position -1):       ${fmt(bars[lastIdx - 1])}`,
+    "",
+    "Decide which is the **most recent CLOSED** bar:",
+    "  - If the rightmost candle on the chart looks **fully formed** (full body, definite close) → use **bar A** as `current_closed_bar`.",
+    "  - If the rightmost candle looks **partial / forming** (active price tag attached, possibly thinner body) → use **bar B** as `current_closed_bar` (the one to its immediate left), and report bar A in `forming_bar`.",
+    "",
+    "Then compute body_pct_of_range, upper_wick_pct, lower_wick_pct, close_position from the chosen bar's exact OHLC. **Do not eyeball — use the numbers above.**",
+    "",
+    "Helper context for older bars (these are bars to the LEFT of bar B, ordered oldest → newest):",
+    ...bars.slice(0, -2).map((b, i) => `  • bar at position -${bars.length - 1 - i}: ${fmt(b)}`),
+  ];
+  return lines.join("\n");
+}
+
 // Wait until the chart is ready. Two modes:
 //   1. legacy (no expectedSymbol): only checks the loading spinner. Use this
 //      when the caller doesn't know what symbol to expect (e.g. initial

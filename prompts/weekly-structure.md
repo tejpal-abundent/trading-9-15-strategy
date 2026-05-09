@@ -38,13 +38,13 @@ Return **pure JSON only**.
 
 Locate the rightmost candle on the chart. If it is still forming (small body, partial range, or earlier in the week than Friday close), the "current closed bar" is the bar IMMEDIATELY TO ITS LEFT. Otherwise the rightmost solid candle IS the current closed bar.
 
-**Anchor with OHLC.** The TradingView chart header (top-left of the canvas) shows `O / H / L / C` for the bar your cursor is hovering over. Hover over the bar you've identified as the current closed bar and copy its four numbers into `current_closed_bar.open/high/low/close`. Then compute body/wick/close_position FROM those numbers, not by eye:
+{OHLC_GROUND_TRUTH}
+
+Compute body/wick/close_position from the chosen bar's exact OHLC:
 - `body_pct_of_range` = round( |close − open| / (high − low) × 100 )
 - `upper_wick_pct` = round( (high − max(open, close)) / (high − low) × 100 )
 - `lower_wick_pct` = round( (min(open, close) − low) / (high − low) × 100 )
-- `close_position` bucket from (close − low) / (high − low): ≥0.95 = at_high, ≥0.66 = upper_third, ≥0.33 = mid, ≥0.05 = lower_third, else at_low (long-bias bucketing; symmetric for short)
-
-If the chart header values disagree with your visual estimate, **trust the header**. The header is the source of truth.
+- `close_position` bucket from (close − low) / (high − low): ≥0.95 = at_high, ≥0.66 = upper_third, ≥0.33 = mid, ≥0.05 = lower_third, else at_low
 
 ```json
 "measurements": {
