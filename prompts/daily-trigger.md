@@ -138,9 +138,12 @@ Read the rightmost CLOSED candle. Each candle_verdict subfield is gated:
 - `winner = "buyers"` ONLY IF `current_closed_bar.color = "green"` AND `body_pct_of_range ≥ 40`
 - `winner = "sellers"` symmetric
 - `winner = "mixed"` for body < 40 OR doji-shape candles
-- `winner_strength` (0-10) — derived from body and close position (matching the bar's winner):
-  - **8-10** if `body_pct_of_range ≥ 60` AND `close_position ∈ {"at_high", "at_low"}` AND `body_atr_mult ≥ 0.8` (V2.1 — decisive close at extreme on a real expansion bar)
-  - **5-7** if `body_pct_of_range ≥ 40` AND `close_position ∈ {"upper_third", "lower_third", "at_high", "at_low"}` (and not already in 8-10)
+- `winner_strength` (0-10) — derived from body and close position (matching the bar's winner). The thresholds are MINIMUMS — meet the body/close criterion, score AT LEAST that floor:
+  - **≥ 9** if `body_pct_of_range ≥ 70` AND `close_position ∈ {"at_high", "at_low"}` AND `in_bias = true` AND `body_atr_mult ≥ 0.8` (V2.5 — textbook decisive in-bias close)
+  - **≥ 8** if `body_pct_of_range ≥ 70` AND `close_position ∈ {"at_high", "at_low"}` AND `in_bias = true` (decisive close at extreme, body alone is the signal regardless of ATR)
+  - **≥ 7** if `body_pct_of_range ≥ 60` AND `close_position ∈ {"upper_third", "lower_third", "at_high", "at_low"}` AND `in_bias = true` (V2.5 — solid in-bias body with close in the bias half is a real trigger; do NOT score this below 7)
+  - **≥ 7** if `pattern ∈ {"engulfing_bull", "engulfing_bear", "solid_bull", "solid_bear"}` AND `in_bias = true` (V2.5 — a recognized in-bias engulfing/solid pattern is by definition a strong trigger)
+  - **5-6** if `body_pct_of_range ≥ 40` AND `close_position ∈ {"upper_third", "lower_third", "at_high", "at_low"}` (decent body but either against bias or below the ≥60 threshold)
   - **0-4** otherwise (small body OR close in mid)
 - `liquidity_swept = "above_prior_high"` ONLY IF `current_closed_bar.high_vs_prior_bar_high = "above"` AND `close_position ∈ {"lower_third", "at_low"}` AND `color = "red"`
 - `liquidity_swept = "below_prior_low"` symmetric
@@ -221,8 +224,16 @@ A swing trade is only worth taking if R:R ≥ 2. Read levels off the chart — y
      // short: symmetric (above trigger candle high / swept high + 0.25 ATR).
   "invalidation_basis": "trigger_low" | "trigger_high" | "swept_low" | "swept_high" | "swing_low" | "swing_high" | "ema_band" | "other",
   "target_level": 0.0,
-     // long: nearest visible prior swing high / weekly POI above / 1.272 extension of the prior leg.
-     // short: symmetric.
+     // V2.5 — target selection priority (use the FIRST that gives RR ≥ 2.0):
+     //   1. weekly POI in {WEEKLY_POI_LIST} on the bias side of entry
+     //   2. nearest visible prior daily swing high (long) / swing low (short) on the bias side
+     //   3. monthly swing on the bias side
+     //   4. 1.272 extension of the prior structural leg
+     //   5. round number ONLY as a last resort, AND ONLY if no structural target above gives ≥ 2.0 RR
+     // Round-number targets that yield RR < 2.0 are USUALLY a red flag that you stopped looking too soon —
+     // scan further down the chart (long bias: scan further up) for the next visible structural level.
+     // Example: if entry is at 0.7764 and the round number 0.7700 gives RR=1.1, keep scanning down — there is
+     // almost always a prior structural low further out (e.g. 0.7600 / 0.7550) that gives RR ≥ 2.5+.
   "target_basis": "prior_swing_high" | "prior_swing_low" | "weekly_poi" | "monthly_swing" | "1.272_ext" | "round_number" | "other",
   "risk_atr": 0.0,    // |entry − invalidation| / atr14_visible
   "reward_atr": 0.0,  // |target − entry|       / atr14_visible

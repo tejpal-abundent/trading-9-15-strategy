@@ -192,7 +192,11 @@ test("validateCellConsistency: solid_bull with body_atr_mult 0.4 → pattern dro
   assert.ok((cell.consistency_log ?? []).some((l) => l.includes("body_atr_mult")));
 });
 
-test("validateCellConsistency: winner_strength 9 with body_atr_mult 0.7 → clamped to 5", () => {
+test("validateCellConsistency: winner_strength 9 with body_atr_mult 0.7 → clamped to 7", () => {
+  // V2.5 — clamp to 7 (was 5). 8+ implies elite expansion bar that needs ATR
+  // backing, but 7 is the "decisive close at extreme" floor that body% +
+  // close-position alone earn. Previous clamp to 5 killed the strong-trigger
+  // override on slightly-sub-ATR bars where the close was textbook.
   const cell = mkDaily({
     candle_verdict: {
       body_pct_of_range: 70, upper_wick_pct: 10, lower_wick_pct: 10,
@@ -204,7 +208,7 @@ test("validateCellConsistency: winner_strength 9 with body_atr_mult 0.7 → clam
     }),
   });
   validateCellConsistency(cell, "long");
-  assert.equal(cell.candle_verdict.winner_strength, 5);
+  assert.equal(cell.candle_verdict.winner_strength, 7);
 });
 
 test("validateCellConsistency: winner_strength 9 with body_atr_mult 0.9 → kept", () => {
@@ -336,10 +340,39 @@ test("computeDailyTriggerType: missing bias → none", () => {
 
 // ─── dailyCellState: RR gate ──────────────────────────────────────────────
 
-test("dailyCellState: ENTER candidate with rr_ratio 1.5 → downgraded to WATCH", () => {
+test("dailyCellState: ENTER candidate with rr_ratio 1.4 + non-strong trigger → WATCH (2.0 floor)", () => {
+  // V2.5 — RR gate floor depends on whether strong-trigger fires.
+  // mkDaily defaults to a candle that DOES trigger the override
+  // (solid_bull, ws=8, body=70, close at_high, in_bias) — so we strip the
+  // pattern here to drop into the standard 2.0 RR floor.
+  const monthly = mkMonthly();
+  const weekly = mkWeekly();
+  const cell = mkDaily({
+    candle_verdict: { ...mkDaily().candle_verdict, pattern: "none" },
+    trade_plan: { risk_atr: 1, reward_atr: 1.4, rr_ratio: 1.4 },
+  });
+  assert.equal(dailyCellState(cell, monthly, weekly), "WATCH");
+});
+
+test("dailyCellState: strong-trigger candle with rr_ratio 1.5 → ENTER (relaxed floor)", () => {
+  // V2.5 — strong-trigger override relaxes RR floor 2.0 → 1.5.
   const monthly = mkMonthly();
   const weekly = mkWeekly();
   const cell = mkDaily({ trade_plan: { risk_atr: 1, reward_atr: 1.5, rr_ratio: 1.5 } });
+  assert.equal(dailyCellState(cell, monthly, weekly), "ENTER");
+});
+
+test("dailyCellState: strong-trigger candle with rr_ratio 1.0 → ENTER (relaxed floor 1.0)", () => {
+  const monthly = mkMonthly();
+  const weekly = mkWeekly();
+  const cell = mkDaily({ trade_plan: { risk_atr: 1, reward_atr: 1.0, rr_ratio: 1.0 } });
+  assert.equal(dailyCellState(cell, monthly, weekly), "ENTER");
+});
+
+test("dailyCellState: strong-trigger candle with rr_ratio 0.9 → WATCH (below 1.0 floor)", () => {
+  const monthly = mkMonthly();
+  const weekly = mkWeekly();
+  const cell = mkDaily({ trade_plan: { risk_atr: 1, reward_atr: 0.9, rr_ratio: 0.9 } });
   assert.equal(dailyCellState(cell, monthly, weekly), "WATCH");
 });
 

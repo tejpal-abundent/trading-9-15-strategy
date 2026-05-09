@@ -32,6 +32,15 @@ const RESULT_DIR = "scan-results";
 // WATCH even if every other gate passes. Win rate is meaningless without R:R:
 // 60% at 1:1 loses to 40% at 1:3.
 const MIN_ENTER_RR = 2.0;
+// V2.5 — when the strong-trigger override fires (the candle ITSELF is a
+// recognized in-bias decisive pattern), the model often picks a lazy near-by
+// target (round number, first POI it found) when a deeper structural level
+// exists. The pattern itself is the trade signal — we don't want to throw it
+// away on the model's target-selection miss. The strong-trigger RR floor
+// drops to 1.0: any positive RR with a clean pattern fires ENTER, and the
+// user manages target at execution time. Strict 2.0 still applies to all
+// non-override paths (where pattern alone isn't the signal).
+const MIN_ENTER_RR_STRONG_TRIGGER = 1.0;
 // Stricter floors at the grade boundaries (used by deriveConfluence). Earned
 // by raising the bar on what counts as a top-tier setup.
 const MIN_RR_FOR_A_PLUS = 3.0;
@@ -385,8 +394,12 @@ export function dailyCellState(cell, monthly = null, weekly = null) {
     // V2.1 — RR gate. Below MIN_ENTER_RR the trade is mathematically not worth
     // taking. Downgrade to WATCH so it shows on the report (the human can
     // still decide) but it never auto-routes to a real ENTER signal.
+    // V2.5 — relaxed floor (MIN_ENTER_RR_STRONG_TRIGGER) when the strong-trigger
+    // override fires; the candle pattern is good enough that we accept a
+    // shallower-target plan rather than rejecting the whole setup.
     const tp = cell.trade_plan;
-    if (tp && typeof tp.rr_ratio === "number" && tp.rr_ratio < MIN_ENTER_RR) {
+    const rrFloor = strongTrigger ? MIN_ENTER_RR_STRONG_TRIGGER : MIN_ENTER_RR;
+    if (tp && typeof tp.rr_ratio === "number" && tp.rr_ratio < rrFloor) {
       return "WATCH";
     }
 
@@ -1067,20 +1080,52 @@ export function recomputeBarFromOhlc(bar) {
   };
 }
 
-export function validateCellConsistency(cell, fallbackDirection = null) {
+export function validateCellConsistency(cell, fallbackDirection = null, recentBars = null) {
   if (!cell || cell.parse_failed) return cell;
   if (!cell.measurements) return cell;
 
   const log = [];
 
-  // 0. V2.2 — OHLC anchor consistency. When the model returned O/H/L/C for
+  // 0a. V2.5 — ground-truth bar pinning. The model is told to choose between
+  // bar A (rightmost) and bar B (second-from-right) as `current_closed_bar`.
+  // Sometimes it picks a different bar entirely (e.g. the bar at index -2 of
+  // last_5_candles), keeps that bar's OHLC self-consistent, and the rest of
+  // the validator can't catch the wrong-bar choice. Fix: if recentBars is
+  // available, compare c0.close to barA.close and barB.close. If neither
+  // matches within tolerance, force-overwrite c0 OHLC with bar B (the safer
+  // default — second-from-right is always closed for live mid-period scans).
+  const c0 = cell.measurements.current_closed_bar;
+  if (c0 && Array.isArray(recentBars) && recentBars.length >= 2 && typeof c0.close === "number") {
+    const barA = recentBars[recentBars.length - 1];
+    const barB = recentBars[recentBars.length - 2];
+    const closeMatch = (target) =>
+      typeof target?.close === "number" &&
+      Math.abs(c0.close - target.close) / Math.max(Math.abs(target.close), 1e-9) < 0.001;
+    if (!closeMatch(barA) && !closeMatch(barB)) {
+      log.push(
+        `pinned current_closed_bar OHLC to bar B (was close=${c0.close}; bar A close=${barA?.close}, bar B close=${barB?.close})`,
+      );
+      c0.open = barB.open;
+      c0.high = barB.high;
+      c0.low = barB.low;
+      c0.close = barB.close;
+      // Strip stale derived fields so the recompute below regenerates them
+      // from the corrected OHLC.
+      delete c0.body_pct_of_range;
+      delete c0.upper_wick_pct;
+      delete c0.lower_wick_pct;
+      delete c0.close_position;
+      delete c0.color;
+    }
+  }
+
+  // 0b. V2.2 — OHLC anchor consistency. When the model returned O/H/L/C for
   // current_closed_bar, recompute body% / wick% / close_position / color from
   // those numbers and overwrite the reported values when they drift > 5pp or
   // disagree on bucket. Catches both arithmetic mistakes AND wrong-bar
   // identification (model echoing OHLC from candle X but reading measurements
   // off candle Y — the chart-header OHLC is the authoritative anchor). Legacy
   // cells without OHLC pass through unchanged for back-compat.
-  const c0 = cell.measurements.current_closed_bar;
   const computed = recomputeBarFromOhlc(c0);
   if (computed) {
     const numericChecks = [
@@ -1162,10 +1207,18 @@ export function validateCellConsistency(cell, fallbackDirection = null) {
     }
   }
 
-  // 4. V2.1 — ATR clamp on solid_* patterns + winner_strength. A "solid"
-  // candle that's actually sub-ATR is a tight inside bar dressed up; downgrade
-  // both the pattern (→ "none") and the winner_strength (→ ≤ 5). This stops
-  // dailyCellState from issuing ENTER on a measurement-poor candle.
+  // 4. V2.1/V2.5 — ATR clamps on candle_verdict.
+  //
+  //   solid_*  pattern  + body_atr_mult < SOLID_BODY_ATR_MIN  → pattern → "none"
+  //     (tight inside bar dressed up as a solid_*; not a real expansion)
+  //
+  //   winner_strength ≥ 8  + body_atr_mult < STRONG_WINNER_BODY_ATR_MIN  →
+  //     V2.5: clamp to 7 (NOT 5). 8+ implies "elite expansion bar" and needs
+  //     ATR backing, but 7 is the "decisive close at extreme" floor — that
+  //     evidence (body% + close position) survives a slightly sub-ATR bar.
+  //     Earlier clamp to 5 was too punitive: it killed the strong-trigger
+  //     override (which fires on ws ≥ 7) for any bar at 0.74 ATR even though
+  //     the close-at-low + body=76% was textbook.
   const v = cell.candle_verdict;
   const c = cell.measurements.current_closed_bar;
   if (v && c && typeof c.body_atr_mult === "number") {
@@ -1177,8 +1230,8 @@ export function validateCellConsistency(cell, fallbackDirection = null) {
     if (typeof v.winner_strength === "number" &&
         v.winner_strength >= 8 &&
         c.body_atr_mult < STRONG_WINNER_BODY_ATR_MIN) {
-      log.push(`clamped winner_strength ${v.winner_strength} → 5 — body_atr_mult ${c.body_atr_mult} < ${STRONG_WINNER_BODY_ATR_MIN}`);
-      v.winner_strength = 5;
+      log.push(`clamped winner_strength ${v.winner_strength} → 7 — body_atr_mult ${c.body_atr_mult} < ${STRONG_WINNER_BODY_ATR_MIN}`);
+      v.winner_strength = 7;
     }
   }
 
@@ -1501,7 +1554,7 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBl
     attempts,
     used_fallback: usedFallback && !parseFailed,
   };
-  return validateCellConsistency(cell);
+  return validateCellConsistency(cell, null, recentBars);
 }
 
 // Weekly cell parse check.
@@ -1636,7 +1689,7 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     attempts,
     used_fallback: usedFallback && !parseFailed,
   };
-  return validateCellConsistency(cell);
+  return validateCellConsistency(cell, null, recentBars);
 }
 
 // Daily cell parse check — requires candle_verdict + state field.
@@ -1773,7 +1826,10 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
   // Run consistency check BEFORE state derivation so dropped flags change
   // the NONE/WATCH/ENTER outcome. Daily cells have no `direction` of their
   // own — pass weekly.direction as fallback so red-flag gates can evaluate.
-  cell = validateCellConsistency(cell, weeklyCell?.direction);
+  // V2.5 — pass recentBars so the validator can pin current_closed_bar OHLC
+  // to the actual rightmost-closed bar from TV's data feed when the model
+  // picked a bar further left.
+  cell = validateCellConsistency(cell, weeklyCell?.direction, recentBars);
   cell.setup_match = computeSetupMatchCount(cell);
   // Authoritative state computation — the scanner's code is the source of
   // truth for NONE/WATCH/ENTER, not the prompt's self-reported field.
