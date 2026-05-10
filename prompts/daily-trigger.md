@@ -42,6 +42,10 @@ Locate the rightmost candle on the chart. If it is still forming, the "most rece
 
 {OHLC_GROUND_TRUTH}
 
+{SMC_GROUND_TRUTH}
+
+The SMC summary above is computed deterministically from the last 100 bars' OHLC. Use it to inform `coc_present`, `liquidity_swept`, and `competition.sweep_then_displacement` — when SMC says "Last CHoCH: bearish (3 bars ago)" and bias is short, `coc_present` should be true regardless of what the chart "looks like". Do NOT contradict SMC ground truth. (The scanner also overrides `coc_present` deterministically post-parse, so honesty here just helps the diagnostic logs.)
+
 Compute body/wick/close_position from the chosen bar's exact OHLC. The four formulas are the same as the weekly prompt's Anchor section.
 
 ```json

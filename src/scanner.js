@@ -22,6 +22,7 @@ import { askGeminiVision, getTodaysCost, recordCost, fillRubric } from "./visual
 import { fetchCandles, emaAlignment, agree } from "./higher-tf.js";
 import { loadPriorRunsForWatchlist, derivePriorContext } from "./history.js";
 import { clusterDedupe } from "./clusters.js";
+import { computeSmcContext, formatSmcContextForPrompt } from "./smc.js";
 
 const HTF_TIMEFRAMES = ["1M", "1W", "1D"];
 const LTF_TIMEFRAMES = ["4H", "2H", "1H"];
@@ -1710,9 +1711,13 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     dateDir,
   );
 
-  // V2.5 — OHLC ground truth from TV's data feed.
-  const recentBars = await getRecentBars(client, 6);
+  // V2.5 — OHLC ground truth from TV's data feed (last 6 bars formatted into
+  // the prompt). V2.6 — pull a longer history (100 bars) so SMC primitives
+  // (swings, BOS, CHoCH, FVG, liquidity) have enough room to find structure.
+  const recentBars = await getRecentBars(client, 100);
   const ohlcGroundTruth = formatRecentBarsForPrompt(recentBars);
+  const smcContext = computeSmcContext(recentBars, weeklyCell?.direction || "none");
+  const smcGroundTruth = formatSmcContextForPrompt(smcContext);
 
   const primaryModel =
     process.env.DAILY_MODEL ||
@@ -1754,6 +1759,7 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
       CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
       PRIOR_CONTEXT: priorBlock,
       OHLC_GROUND_TRUTH: ohlcGroundTruth,
+      SMC_GROUND_TRUTH: smcGroundTruth,
     });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
@@ -1795,24 +1801,58 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     rb?.competition ||
     "";
 
+  // V2.6 — SMC override of coc_present. The model's vision-derived coc_present
+  // varies run-to-run on the same chart (the user's #1 noise complaint).
+  // computeSmcContext.recent_choch_in_bias is deterministic from OHLC swings.
+  // We trust SMC here; if the model AND SMC both vote, we OR them so we don't
+  // suppress a vision read SMC missed (e.g., choch beyond our 100-bar window).
+  const smcCocPresent = !!smcContext.recent_choch_in_bias;
+  const cocPresent = smcCocPresent || !!result?.coc_present;
+
+  // V2.6 — recompute prep_signals_count from the post-SMC values so downstream
+  // gates see the corrected coc_present.
+  const angleOk = !!result?.angle_ok;
+  const zoneRejection = !!result?.zone_rejection;
+  const solidContinuation = !!result?.solid_continuation;
+  const prepCount =
+    (angleOk ? 1 : 0) + (zoneRejection ? 1 : 0) + (cocPresent ? 1 : 0) + (solidContinuation ? 1 : 0);
+
+  // V2.6 — bonus confluence from SMC: bump poi_confluence.count by
+  // smcContext.bonus_count so deriveConfluence can use unmitigated FVG, recent
+  // BOS-in-bias, and counter-bias liquidity sweep as additional confluence.
+  let poi = result?.poi_confluence ?? null;
+  if (poi && typeof poi === "object") {
+    const baseCount = typeof poi.count === "number" ? poi.count : 0;
+    poi = { ...poi, count: baseCount + smcContext.bonus_count, smc_bonus: smcContext.bonus_count };
+  } else if (smcContext.bonus_count > 0) {
+    poi = {
+      at_ema9_15_band: false, at_prior_daily_swing: false,
+      at_prior_day_high_low: false, at_weekly_poi: false,
+      count: smcContext.bonus_count, smc_bonus: smcContext.bonus_count,
+      primary_poi_description: "(SMC-only — model returned no poi_confluence)",
+    };
+  }
+
   let cell = {
     tf: "1D",
     direction_conflict: !!result?.direction_conflict,
     setup_type: result?.setup_type ?? "none",
-    angle_ok: !!result?.angle_ok,
-    zone_rejection: !!result?.zone_rejection,
-    coc_present: !!result?.coc_present,
-    solid_continuation: !!result?.solid_continuation,
-    prep_signals_count: result?.prep_signals_count ?? 0,
+    angle_ok: angleOk,
+    zone_rejection: zoneRejection,
+    coc_present: cocPresent,
+    solid_continuation: solidContinuation,
+    prep_signals_count: prepCount,
     probability_next_candle_in_bias: result?.probability_next_candle_in_bias ?? 0,
     red_flags: result?.red_flags ?? [],
     candle_verdict: result?.candle_verdict ?? null,
     measurements: result?.measurements ?? null,
     // V2.1 fields — flow through cleanly even if the model omitted them
     sequence_read: result?.sequence_read ?? null,
-    poi_confluence: result?.poi_confluence ?? null,
+    poi_confluence: poi,
     competition: result?.competition ?? null,
     trade_plan: result?.trade_plan ?? null,
+    // V2.6 — SMC ground truth attached to the cell for diagnostics + grading.
+    smc_context: smcContext,
     reasoning_block: rb,
     reasoning: legacyReasoning,
     image: imagePath,
