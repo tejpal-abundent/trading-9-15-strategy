@@ -40,7 +40,13 @@ Return **pure JSON only**.
 
 Locate the rightmost candle on the chart. If it is still forming, the "most recent CLOSED candle" is the bar IMMEDIATELY TO ITS LEFT. Otherwise the rightmost solid candle IS the current closed bar.
 
-**Anchor with OHLC.** The TradingView chart header (top-left of the canvas) shows `O / H / L / C` for the bar your cursor is hovering over. Hover over the bar you've identified as the current closed bar and copy its four numbers into `current_closed_bar.open/high/low/close`. Then compute body/wick/close_position FROM those numbers, not by eye. The four formulas are the same as the weekly prompt's Anchor section. **If the chart header disagrees with your visual estimate, trust the header.**
+{OHLC_GROUND_TRUTH}
+
+{SMC_GROUND_TRUTH}
+
+The SMC summary above is computed deterministically from the last 100 bars' OHLC. Use it to inform `coc_present`, `liquidity_swept`, and `competition.sweep_then_displacement` — when SMC says "Last CHoCH: bearish (3 bars ago)" and bias is short, `coc_present` should be true regardless of what the chart "looks like". Do NOT contradict SMC ground truth. (The scanner also overrides `coc_present` deterministically post-parse, so honesty here just helps the diagnostic logs.)
+
+Compute body/wick/close_position from the chosen bar's exact OHLC. The four formulas are the same as the weekly prompt's Anchor section.
 
 ```json
 "measurements": {
@@ -107,6 +113,16 @@ Locate the rightmost candle on the chart. If it is still forming, the "most rece
 
 ## Pass 2 — Gated verdicts
 
+### Step 0 — Setup type (pullback vs continuation)
+
+Look at the last 3 closed bars (`last_5_candles[-2]`, `last_5_candles[-1]`, `last_5_candles[0]`) and pick ONE:
+
+- **"pullback"** — at least ONE of `last_5_candles[-2]` or `last_5_candles[-1]` closed COUNTER-bias (e.g. green close in a short setup, red close in a long setup), AND `current_closed_bar` (= `last_5_candles[0]`) closed solidly IN-bias and broke the prior bar's extreme. This is the "trapped trader / failed reversal then engulf" pattern — the counter-bias bar(s) attracted longs/shorts who got run over by the bias-direction continuation.
+- **"continuation"** — the last 3 bars (`-2`, `-1`, `0`) ALL closed in-bias with no counter-bias attempt visible. Steady drive in the bias direction, no pullback to clear.
+- **"none"** — neither (choppy, mixed, or current bar isn't decisively in-bias).
+
+**Bias for "pullback" labeling:** when the recent counter-bias attempt got engulfed/rejected by the current bar, prefer "pullback" over "continuation" — the rejection IS the trigger.
+
 ### Step 1 — Prep signals (setup forming)
 
 Each is a precondition for a valid trigger — not the trigger itself.
@@ -126,9 +142,12 @@ Read the rightmost CLOSED candle. Each candle_verdict subfield is gated:
 - `winner = "buyers"` ONLY IF `current_closed_bar.color = "green"` AND `body_pct_of_range ≥ 40`
 - `winner = "sellers"` symmetric
 - `winner = "mixed"` for body < 40 OR doji-shape candles
-- `winner_strength` (0-10) — derived from body and close position (matching the bar's winner):
-  - **8-10** if `body_pct_of_range ≥ 60` AND `close_position ∈ {"at_high", "at_low"}` AND `body_atr_mult ≥ 0.8` (V2.1 — decisive close at extreme on a real expansion bar)
-  - **5-7** if `body_pct_of_range ≥ 40` AND `close_position ∈ {"upper_third", "lower_third", "at_high", "at_low"}` (and not already in 8-10)
+- `winner_strength` (0-10) — derived from body and close position (matching the bar's winner). The thresholds are MINIMUMS — meet the body/close criterion, score AT LEAST that floor:
+  - **≥ 9** if `body_pct_of_range ≥ 70` AND `close_position ∈ {"at_high", "at_low"}` AND `in_bias = true` AND `body_atr_mult ≥ 0.8` (V2.5 — textbook decisive in-bias close)
+  - **≥ 8** if `body_pct_of_range ≥ 70` AND `close_position ∈ {"at_high", "at_low"}` AND `in_bias = true` (decisive close at extreme, body alone is the signal regardless of ATR)
+  - **≥ 7** if `body_pct_of_range ≥ 60` AND `close_position ∈ {"upper_third", "lower_third", "at_high", "at_low"}` AND `in_bias = true` (V2.5 — solid in-bias body with close in the bias half is a real trigger; do NOT score this below 7)
+  - **≥ 7** if `pattern ∈ {"engulfing_bull", "engulfing_bear", "solid_bull", "solid_bear"}` AND `in_bias = true` (V2.5 — a recognized in-bias engulfing/solid pattern is by definition a strong trigger)
+  - **5-6** if `body_pct_of_range ≥ 40` AND `close_position ∈ {"upper_third", "lower_third", "at_high", "at_low"}` (decent body but either against bias or below the ≥60 threshold)
   - **0-4** otherwise (small body OR close in mid)
 - `liquidity_swept = "above_prior_high"` ONLY IF `current_closed_bar.high_vs_prior_bar_high = "above"` AND `close_position ∈ {"lower_third", "at_low"}` AND `color = "red"`
 - `liquidity_swept = "below_prior_low"` symmetric
@@ -209,8 +228,16 @@ A swing trade is only worth taking if R:R ≥ 2. Read levels off the chart — y
      // short: symmetric (above trigger candle high / swept high + 0.25 ATR).
   "invalidation_basis": "trigger_low" | "trigger_high" | "swept_low" | "swept_high" | "swing_low" | "swing_high" | "ema_band" | "other",
   "target_level": 0.0,
-     // long: nearest visible prior swing high / weekly POI above / 1.272 extension of the prior leg.
-     // short: symmetric.
+     // V2.5 — target selection priority (use the FIRST that gives RR ≥ 2.0):
+     //   1. weekly POI in {WEEKLY_POI_LIST} on the bias side of entry
+     //   2. nearest visible prior daily swing high (long) / swing low (short) on the bias side
+     //   3. monthly swing on the bias side
+     //   4. 1.272 extension of the prior structural leg
+     //   5. round number ONLY as a last resort, AND ONLY if no structural target above gives ≥ 2.0 RR
+     // Round-number targets that yield RR < 2.0 are USUALLY a red flag that you stopped looking too soon —
+     // scan further down the chart (long bias: scan further up) for the next visible structural level.
+     // Example: if entry is at 0.7764 and the round number 0.7700 gives RR=1.1, keep scanning down — there is
+     // almost always a prior structural low further out (e.g. 0.7600 / 0.7550) that gives RR ≥ 2.5+.
   "target_basis": "prior_swing_high" | "prior_swing_low" | "weekly_poi" | "monthly_swing" | "1.272_ext" | "round_number" | "other",
   "risk_atr": 0.0,    // |entry − invalidation| / atr14_visible
   "reward_atr": 0.0,  // |target − entry|       / atr14_visible

@@ -64,6 +64,15 @@ export async function askGeminiVision({
     config: {
       temperature: 0,
       responseMimeType: "application/json",
+      // V2.5 — enable extended thinking so the model walks through bar
+      // identification, OHLC extraction, and pattern recognition step-by-
+      // step before committing to JSON. Without this the responses had
+      // high variance on subtle visual reads (wrong-bar identification,
+      // weak winner_strength on bars that were obviously solid). 8192 is
+      // a moderate budget — can be tuned via THINKING_BUDGET env var.
+      thinkingConfig: {
+        thinkingBudget: Number(process.env.THINKING_BUDGET ?? 8192),
+      },
     },
   });
 

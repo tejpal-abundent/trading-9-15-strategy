@@ -15,11 +15,14 @@ import {
   readRenderedSymbol,
   verifyRenderedMatchesExpected,
   ChartSymbolSwitchFailedError,
+  getRecentBars,
+  formatRecentBarsForPrompt,
 } from "./tv-navigate.js";
 import { askGeminiVision, getTodaysCost, recordCost, fillRubric } from "./visual.js";
 import { fetchCandles, emaAlignment, agree } from "./higher-tf.js";
 import { loadPriorRunsForWatchlist, derivePriorContext } from "./history.js";
 import { clusterDedupe } from "./clusters.js";
+import { computeSmcContext, formatSmcContextForPrompt } from "./smc.js";
 
 const HTF_TIMEFRAMES = ["1M", "1W", "1D"];
 const LTF_TIMEFRAMES = ["4H", "2H", "1H"];
@@ -30,6 +33,15 @@ const RESULT_DIR = "scan-results";
 // WATCH even if every other gate passes. Win rate is meaningless without R:R:
 // 60% at 1:1 loses to 40% at 1:3.
 const MIN_ENTER_RR = 2.0;
+// V2.5 — when the strong-trigger override fires (the candle ITSELF is a
+// recognized in-bias decisive pattern), the model often picks a lazy near-by
+// target (round number, first POI it found) when a deeper structural level
+// exists. The pattern itself is the trade signal — we don't want to throw it
+// away on the model's target-selection miss. The strong-trigger RR floor
+// drops to 1.0: any positive RR with a clean pattern fires ENTER, and the
+// user manages target at execution time. Strict 2.0 still applies to all
+// non-override paths (where pattern alone isn't the signal).
+const MIN_ENTER_RR_STRONG_TRIGGER = 1.0;
 // Stricter floors at the grade boundaries (used by deriveConfluence). Earned
 // by raising the bar on what counts as a top-tier setup.
 const MIN_RR_FOR_A_PLUS = 3.0;
@@ -299,7 +311,37 @@ export function dailyCellState(cell, monthly = null, weekly = null) {
   const requiredSatisfied = matchInfo.required_satisfied;
 
   const dominant = isTrendDominant(monthly, weekly);
-  const watchFloor = dominant ? 1 : 2;
+  let watchFloor = dominant ? 1 : 2;
+
+  // V2.5 — strong-trigger pre-check. When the candle is itself a decisive
+  // recognized pattern in-bias (engulfing/solid/hammer/etc with body ≥ 60%,
+  // winner_strength ≥ 7, close at extreme), the candle IS the trigger — we
+  // don't need 2+ corroborating prep signals. Lower the watchFloor to 1 so
+  // matchCount=1 (just angle_ok confirming EMA structure) is enough to
+  // continue into the ENTER path. This catches the "trapped trader / pattern
+  // rejection" setup that the previous gate kept pinning at NONE on
+  // matchCount<2.
+  const v0 = cell.candle_verdict;
+  const c0 = cell.measurements?.current_closed_bar;
+  const closeAtExtreme0 =
+    c0?.close_position === "at_low" ||
+    c0?.close_position === "at_high" ||
+    c0?.close_position === "lower_third" ||
+    c0?.close_position === "upper_third";
+  const direction0 = weekly?.direction;
+  const patternSet0 = direction0 === "long"
+    ? new Set(["engulfing_bull", "hammer", "pinbar_bull", "solid_bull"])
+    : direction0 === "short"
+      ? new Set(["engulfing_bear", "shooting_star", "pinbar_bear", "solid_bear"])
+      : new Set();
+  const strongTriggerCandle =
+    v0 &&
+    patternSet0.has(v0.pattern) &&
+    v0.in_bias === true &&
+    (v0.winner_strength ?? 0) >= 7 &&
+    (c0?.body_pct_of_range ?? 0) >= 60 &&
+    closeAtExtreme0;
+  if (strongTriggerCandle) watchFloor = 1;
 
   if (matchCount < watchFloor) return "NONE";
 
@@ -315,13 +357,50 @@ export function dailyCellState(cell, monthly = null, weekly = null) {
   // Standard ENTER path
   if (v.in_bias === true && (v.winner_strength ?? 0) >= ENTER_WINNER_STRENGTH_THRESHOLD) {
     const isTypedSetup = cell.setup_type === "pullback" || cell.setup_type === "continuation";
-    if (isTypedSetup && !requiredSatisfied) return "WATCH";
+    // V2.5 — strong-trigger override. The candle ITSELF is the signal —
+    // when a recognized reversal/continuation pattern prints in-bias with a
+    // decisive close, prep_signals_count of 1 (angle_ok alone) is enough to
+    // promote to ENTER. Catches the "engulfing rejection / trapped-trader
+    // trap-and-flip" signal that the model often classifies as setup_type
+    // "continuation" but is really an entry trigger at the candle level.
+    //
+    // Conditions (ALL must hold):
+    //   - candle_verdict.pattern ∈ {engulfing_bull/bear, hammer, shooting_star,
+    //     pinbar_bull/bear, solid_bull, solid_bear} matching bias direction
+    //   - winner_strength ≥ 7
+    //   - body_pct_of_range ≥ 60
+    //   - close_position at extreme (at_high/at_low or upper_third/lower_third)
+    //   - prep_signals_count ≥ 1 (typically angle_ok confirming EMA structure)
+    const c = cell.measurements?.current_closed_bar;
+    const closeAtExtreme =
+      c?.close_position === "at_low" ||
+      c?.close_position === "at_high" ||
+      c?.close_position === "lower_third" ||
+      c?.close_position === "upper_third";
+    const direction = weekly?.direction;
+    const patternSet = direction === "long"
+      ? new Set(["engulfing_bull", "hammer", "pinbar_bull", "solid_bull"])
+      : direction === "short"
+        ? new Set(["engulfing_bear", "shooting_star", "pinbar_bear", "solid_bear"])
+        : new Set();
+    const recognizedPattern = patternSet.has(v.pattern);
+    const strongTrigger =
+      recognizedPattern &&
+      (v.winner_strength ?? 0) >= 7 &&
+      (c?.body_pct_of_range ?? 0) >= 60 &&
+      closeAtExtreme &&
+      (cell.prep_signals_count ?? 0) >= 1;
+    if (isTypedSetup && !requiredSatisfied && !strongTrigger) return "WATCH";
 
     // V2.1 — RR gate. Below MIN_ENTER_RR the trade is mathematically not worth
     // taking. Downgrade to WATCH so it shows on the report (the human can
     // still decide) but it never auto-routes to a real ENTER signal.
+    // V2.5 — relaxed floor (MIN_ENTER_RR_STRONG_TRIGGER) when the strong-trigger
+    // override fires; the candle pattern is good enough that we accept a
+    // shallower-target plan rather than rejecting the whole setup.
     const tp = cell.trade_plan;
-    if (tp && typeof tp.rr_ratio === "number" && tp.rr_ratio < MIN_ENTER_RR) {
+    const rrFloor = strongTrigger ? MIN_ENTER_RR_STRONG_TRIGGER : MIN_ENTER_RR;
+    if (tp && typeof tp.rr_ratio === "number" && tp.rr_ratio < rrFloor) {
       return "WATCH";
     }
 
@@ -1002,20 +1081,52 @@ export function recomputeBarFromOhlc(bar) {
   };
 }
 
-export function validateCellConsistency(cell, fallbackDirection = null) {
+export function validateCellConsistency(cell, fallbackDirection = null, recentBars = null) {
   if (!cell || cell.parse_failed) return cell;
   if (!cell.measurements) return cell;
 
   const log = [];
 
-  // 0. V2.2 — OHLC anchor consistency. When the model returned O/H/L/C for
+  // 0a. V2.5 — ground-truth bar pinning. The model is told to choose between
+  // bar A (rightmost) and bar B (second-from-right) as `current_closed_bar`.
+  // Sometimes it picks a different bar entirely (e.g. the bar at index -2 of
+  // last_5_candles), keeps that bar's OHLC self-consistent, and the rest of
+  // the validator can't catch the wrong-bar choice. Fix: if recentBars is
+  // available, compare c0.close to barA.close and barB.close. If neither
+  // matches within tolerance, force-overwrite c0 OHLC with bar B (the safer
+  // default — second-from-right is always closed for live mid-period scans).
+  const c0 = cell.measurements.current_closed_bar;
+  if (c0 && Array.isArray(recentBars) && recentBars.length >= 2 && typeof c0.close === "number") {
+    const barA = recentBars[recentBars.length - 1];
+    const barB = recentBars[recentBars.length - 2];
+    const closeMatch = (target) =>
+      typeof target?.close === "number" &&
+      Math.abs(c0.close - target.close) / Math.max(Math.abs(target.close), 1e-9) < 0.001;
+    if (!closeMatch(barA) && !closeMatch(barB)) {
+      log.push(
+        `pinned current_closed_bar OHLC to bar B (was close=${c0.close}; bar A close=${barA?.close}, bar B close=${barB?.close})`,
+      );
+      c0.open = barB.open;
+      c0.high = barB.high;
+      c0.low = barB.low;
+      c0.close = barB.close;
+      // Strip stale derived fields so the recompute below regenerates them
+      // from the corrected OHLC.
+      delete c0.body_pct_of_range;
+      delete c0.upper_wick_pct;
+      delete c0.lower_wick_pct;
+      delete c0.close_position;
+      delete c0.color;
+    }
+  }
+
+  // 0b. V2.2 — OHLC anchor consistency. When the model returned O/H/L/C for
   // current_closed_bar, recompute body% / wick% / close_position / color from
   // those numbers and overwrite the reported values when they drift > 5pp or
   // disagree on bucket. Catches both arithmetic mistakes AND wrong-bar
   // identification (model echoing OHLC from candle X but reading measurements
   // off candle Y — the chart-header OHLC is the authoritative anchor). Legacy
   // cells without OHLC pass through unchanged for back-compat.
-  const c0 = cell.measurements.current_closed_bar;
   const computed = recomputeBarFromOhlc(c0);
   if (computed) {
     const numericChecks = [
@@ -1097,10 +1208,18 @@ export function validateCellConsistency(cell, fallbackDirection = null) {
     }
   }
 
-  // 4. V2.1 — ATR clamp on solid_* patterns + winner_strength. A "solid"
-  // candle that's actually sub-ATR is a tight inside bar dressed up; downgrade
-  // both the pattern (→ "none") and the winner_strength (→ ≤ 5). This stops
-  // dailyCellState from issuing ENTER on a measurement-poor candle.
+  // 4. V2.1/V2.5 — ATR clamps on candle_verdict.
+  //
+  //   solid_*  pattern  + body_atr_mult < SOLID_BODY_ATR_MIN  → pattern → "none"
+  //     (tight inside bar dressed up as a solid_*; not a real expansion)
+  //
+  //   winner_strength ≥ 8  + body_atr_mult < STRONG_WINNER_BODY_ATR_MIN  →
+  //     V2.5: clamp to 7 (NOT 5). 8+ implies "elite expansion bar" and needs
+  //     ATR backing, but 7 is the "decisive close at extreme" floor — that
+  //     evidence (body% + close position) survives a slightly sub-ATR bar.
+  //     Earlier clamp to 5 was too punitive: it killed the strong-trigger
+  //     override (which fires on ws ≥ 7) for any bar at 0.74 ATR even though
+  //     the close-at-low + body=76% was textbook.
   const v = cell.candle_verdict;
   const c = cell.measurements.current_closed_bar;
   if (v && c && typeof c.body_atr_mult === "number") {
@@ -1112,8 +1231,8 @@ export function validateCellConsistency(cell, fallbackDirection = null) {
     if (typeof v.winner_strength === "number" &&
         v.winner_strength >= 8 &&
         c.body_atr_mult < STRONG_WINNER_BODY_ATR_MIN) {
-      log.push(`clamped winner_strength ${v.winner_strength} → 5 — body_atr_mult ${c.body_atr_mult} < ${STRONG_WINNER_BODY_ATR_MIN}`);
-      v.winner_strength = 5;
+      log.push(`clamped winner_strength ${v.winner_strength} → 7 — body_atr_mult ${c.body_atr_mult} < ${STRONG_WINNER_BODY_ATR_MIN}`);
+      v.winner_strength = 7;
     }
   }
 
@@ -1341,6 +1460,11 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBl
     dateDir,
   );
 
+  // V2.5 — OHLC ground truth from TV's data feed. Replaces the model's
+  // brittle pixel-based bar identification with exact numbers.
+  const recentBars = await getRecentBars(client, 6);
+  const ohlcGroundTruth = formatRecentBarsForPrompt(recentBars);
+
   const primaryModel =
     process.env.MONTHLY_MODEL ||
     process.env.VISUAL_MODEL ||
@@ -1374,6 +1498,7 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBl
       SYMBOL: item.label,
       CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
       PRIOR_CONTEXT: priorBlock,
+      OHLC_GROUND_TRUTH: ohlcGroundTruth,
     });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
@@ -1430,7 +1555,7 @@ async function evaluateMonthlyCell(client, item, rubric, dateDir = null, priorBl
     attempts,
     used_fallback: usedFallback && !parseFailed,
   };
-  return validateCellConsistency(cell);
+  return validateCellConsistency(cell, null, recentBars);
 }
 
 // Weekly cell parse check.
@@ -1455,6 +1580,10 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     item.tv_symbol,
     dateDir,
   );
+
+  // V2.5 — OHLC ground truth from TV's data feed.
+  const recentBars = await getRecentBars(client, 6);
+  const ohlcGroundTruth = formatRecentBarsForPrompt(recentBars);
 
   const monthlyBias = monthlyCell.direction || "none";
   const in9_15Note = monthlyCell.in_9_15_zone
@@ -1496,6 +1625,7 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
       MONTHLY_IN_9_15_ZONE_NOTE: in9_15Note,
       CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
       PRIOR_CONTEXT: priorBlock,
+      OHLC_GROUND_TRUTH: ohlcGroundTruth,
     });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
@@ -1560,7 +1690,7 @@ async function evaluateWeeklyCell(client, item, monthlyCell, rubric, dateDir = n
     attempts,
     used_fallback: usedFallback && !parseFailed,
   };
-  return validateCellConsistency(cell);
+  return validateCellConsistency(cell, null, recentBars);
 }
 
 // Daily cell parse check — requires candle_verdict + state field.
@@ -1580,6 +1710,14 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     item.tv_symbol,
     dateDir,
   );
+
+  // V2.5 — OHLC ground truth from TV's data feed (last 6 bars formatted into
+  // the prompt). V2.6 — pull a longer history (100 bars) so SMC primitives
+  // (swings, BOS, CHoCH, FVG, liquidity) have enough room to find structure.
+  const recentBars = await getRecentBars(client, 100);
+  const ohlcGroundTruth = formatRecentBarsForPrompt(recentBars);
+  const smcContext = computeSmcContext(recentBars, weeklyCell?.direction || "none");
+  const smcGroundTruth = formatSmcContextForPrompt(smcContext);
 
   const primaryModel =
     process.env.DAILY_MODEL ||
@@ -1620,6 +1758,8 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
       WEEKLY_POI_LIST: formatWeeklyPoiList(weeklyCell.weekly_poi),
       CAPTURED_AT: formatCapturedAtForPrompt(capturedAt),
       PRIOR_CONTEXT: priorBlock,
+      OHLC_GROUND_TRUTH: ohlcGroundTruth,
+      SMC_GROUND_TRUTH: smcGroundTruth,
     });
     const resp = await askGeminiVision({ imagePath, prompt, model: modelToUse });
     recordCost(resp.costUSD);
@@ -1661,24 +1801,58 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
     rb?.competition ||
     "";
 
+  // V2.6 — SMC override of coc_present. The model's vision-derived coc_present
+  // varies run-to-run on the same chart (the user's #1 noise complaint).
+  // computeSmcContext.recent_choch_in_bias is deterministic from OHLC swings.
+  // We trust SMC here; if the model AND SMC both vote, we OR them so we don't
+  // suppress a vision read SMC missed (e.g., choch beyond our 100-bar window).
+  const smcCocPresent = !!smcContext.recent_choch_in_bias;
+  const cocPresent = smcCocPresent || !!result?.coc_present;
+
+  // V2.6 — recompute prep_signals_count from the post-SMC values so downstream
+  // gates see the corrected coc_present.
+  const angleOk = !!result?.angle_ok;
+  const zoneRejection = !!result?.zone_rejection;
+  const solidContinuation = !!result?.solid_continuation;
+  const prepCount =
+    (angleOk ? 1 : 0) + (zoneRejection ? 1 : 0) + (cocPresent ? 1 : 0) + (solidContinuation ? 1 : 0);
+
+  // V2.6 — bonus confluence from SMC: bump poi_confluence.count by
+  // smcContext.bonus_count so deriveConfluence can use unmitigated FVG, recent
+  // BOS-in-bias, and counter-bias liquidity sweep as additional confluence.
+  let poi = result?.poi_confluence ?? null;
+  if (poi && typeof poi === "object") {
+    const baseCount = typeof poi.count === "number" ? poi.count : 0;
+    poi = { ...poi, count: baseCount + smcContext.bonus_count, smc_bonus: smcContext.bonus_count };
+  } else if (smcContext.bonus_count > 0) {
+    poi = {
+      at_ema9_15_band: false, at_prior_daily_swing: false,
+      at_prior_day_high_low: false, at_weekly_poi: false,
+      count: smcContext.bonus_count, smc_bonus: smcContext.bonus_count,
+      primary_poi_description: "(SMC-only — model returned no poi_confluence)",
+    };
+  }
+
   let cell = {
     tf: "1D",
     direction_conflict: !!result?.direction_conflict,
     setup_type: result?.setup_type ?? "none",
-    angle_ok: !!result?.angle_ok,
-    zone_rejection: !!result?.zone_rejection,
-    coc_present: !!result?.coc_present,
-    solid_continuation: !!result?.solid_continuation,
-    prep_signals_count: result?.prep_signals_count ?? 0,
+    angle_ok: angleOk,
+    zone_rejection: zoneRejection,
+    coc_present: cocPresent,
+    solid_continuation: solidContinuation,
+    prep_signals_count: prepCount,
     probability_next_candle_in_bias: result?.probability_next_candle_in_bias ?? 0,
     red_flags: result?.red_flags ?? [],
     candle_verdict: result?.candle_verdict ?? null,
     measurements: result?.measurements ?? null,
     // V2.1 fields — flow through cleanly even if the model omitted them
     sequence_read: result?.sequence_read ?? null,
-    poi_confluence: result?.poi_confluence ?? null,
+    poi_confluence: poi,
     competition: result?.competition ?? null,
     trade_plan: result?.trade_plan ?? null,
+    // V2.6 — SMC ground truth attached to the cell for diagnostics + grading.
+    smc_context: smcContext,
     reasoning_block: rb,
     reasoning: legacyReasoning,
     image: imagePath,
@@ -1692,7 +1866,10 @@ async function evaluateDailyCell(client, item, monthlyCell, weeklyCell, rubric, 
   // Run consistency check BEFORE state derivation so dropped flags change
   // the NONE/WATCH/ENTER outcome. Daily cells have no `direction` of their
   // own — pass weekly.direction as fallback so red-flag gates can evaluate.
-  cell = validateCellConsistency(cell, weeklyCell?.direction);
+  // V2.5 — pass recentBars so the validator can pin current_closed_bar OHLC
+  // to the actual rightmost-closed bar from TV's data feed when the model
+  // picked a bar further left.
+  cell = validateCellConsistency(cell, weeklyCell?.direction, recentBars);
   cell.setup_match = computeSetupMatchCount(cell);
   // Authoritative state computation — the scanner's code is the source of
   // truth for NONE/WATCH/ENTER, not the prompt's self-reported field.
